@@ -24,6 +24,13 @@ export default function App() {
       .select('*')
       .eq('id', userId)
       .single()
+    if (error) {
+      console.error('Profile error:', error.message)
+      // Profile not found or RLS error — sign out to reset
+      await supabase.auth.signOut()
+      setLoading(false)
+      return
+    }
     if (data) setProfile(data)
     setLoading(false)
   }
