@@ -315,15 +315,6 @@ function SProgress({ profile, flashcards, reviews, content }) {
         </div>
       )})}
     </div>
-    <div style={crd}>
-      <h3 style={{ fontSize: 14, fontWeight: 700, color: C.green, margin: '0 0 12px' }}>🎯 Nível CEFR</h3>
-      {['A1', 'A2', 'B1', 'B2', 'C1'].map((l, i) => { const ui = ['A1', 'A2', 'B1', 'B2', 'C1'].indexOf(profile.level || 'A2'); return (
-        <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: i < 4 ? `1px solid ${C.bor}` : 'none' }}>
-          <Tag col={l === profile.level ? C.orange : i < ui ? C.sage : C.muted}>{l}</Tag>
-          <div style={{ flex: 1, height: 6, background: C.bor, borderRadius: 4 }}>{l === profile.level && <div style={{ height: '100%', width: '65%', background: C.orange, borderRadius: 4 }} />}{i < ui && <div style={{ height: '100%', width: '100%', background: C.sage, borderRadius: 4 }} />}</div>
-          {l === profile.level && <span style={{ fontSize: 10, color: C.orange, fontWeight: 700 }}>← você</span>}
-        </div>
-      )})}
-    </div>
+
   </div>
 }
