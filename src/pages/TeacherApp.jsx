@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../supabase'
-import { processLesson, fetchNotionLessons, fmt, today } from '../ai'
+import { processLesson, fmt, today } from '../ai'
 
 const C = { bg: '#f3e6d2', bg2: '#fdf8f1', bg3: '#fff', sidebar: '#2f4f3a', sidebarAct: 'rgba(227,162,90,0.18)', bor: 'rgba(47,79,58,0.12)', bor2: 'rgba(47,79,58,0.25)', orange: '#e07a3a', green: '#2f4f3a', sage: '#9baf8b', tx: '#333', muted: '#7a7a7a', w: '#fff', err: '#c0392b' }
 const inp = { width: '100%', background: C.bg3, border: `1.5px solid ${C.bor}`, borderRadius: 10, padding: '11px 14px', color: C.tx, fontSize: 13, outline: 'none', boxSizing: 'border-box' }
@@ -36,16 +36,31 @@ function Modal({ open, onClose, title, children, w = 520 }) {
   </div>
 }
 
-const NAV = [{ id: 'dash', icon: '📊', label: 'Dashboard' }, { id: 'students', icon: '👥', label: 'Alunos' }, { id: 'lessons', icon: '📖', label: 'Aulas' }, { id: 'content', icon: '📚', label: 'Conteúdos' }, { id: 'sync', icon: '🔄', label: 'Notion Sync' }]
+const NAV = [
+  { id: 'dash', icon: '📊', label: 'Dashboard' },
+  { id: 'students', icon: '👥', label: 'Alunos' },
+  { id: 'lessons', icon: '📖', label: 'Aulas' },
+  { id: 'content', icon: '📚', label: 'Conteúdos' },
+  { id: 'sync', icon: '🔄', label: 'Sync Zoom' },
+]
+
+const CONTENT_TYPES = [
+  { value: 'vocabulary', label: 'Vocabulary', col: C.green },
+  { value: 'idiom', label: 'Idiom', col: C.orange },
+  { value: 'phrasal_verb', label: 'Phrasal Verb', col: C.sage },
+  { value: 'grammar', label: 'Grammar', col: C.green },
+  { value: 'correction', label: 'Correction', col: C.err },
+]
 
 export default function TeacherApp({ user, profile, onLogout }) {
   const [page, setPage] = useState('dash')
   const [nav, setNav] = useState(true)
   const [toast, setToast] = useState(null)
-  const [students, setStudents] = useState([])
+  const [allStudents, setAllStudents] = useState([])
   const [lessons, setLessons] = useState([])
   const [content, setContent] = useState([])
   const [flashcards, setFlashcards] = useState([])
+  const [exSessions, setExSessions] = useState([])
   const [loading, setLoading] = useState(true)
 
   const showToast = useCallback((t) => { setToast(t); setTimeout(() => setToast(null), 3500) }, [])
@@ -53,33 +68,92 @@ export default function TeacherApp({ user, profile, onLogout }) {
   const loadAll = useCallback(async () => {
     setLoading(true)
     const [{ data: stu }, { data: les }, { data: con }, { data: fla }] = await Promise.all([
-      supabase.from('profiles').select('*').eq('teacher_id', profile.id).eq('role', 'student').order('created_at', { ascending: false }),
+      supabase.from('profiles').select('*').eq('role', 'student').order('created_at', { ascending: false }),
       supabase.from('lessons').select('*').eq('teacher_id', profile.id).order('date', { ascending: false }),
       supabase.from('content').select('*').eq('teacher_id', profile.id).order('created_at', { ascending: false }),
       supabase.from('flashcards').select('*, content!inner(teacher_id)').eq('content.teacher_id', profile.id),
     ])
-    setStudents(stu || [])
+    const students = stu || []
+    setAllStudents(students)
     setLessons(les || [])
     setContent(con || [])
     setFlashcards(fla || [])
+
+    if (students.length) {
+      const ids = students.map(s => s.id)
+      const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+      const { data: ses } = await supabase.from('exercise_sessions').select('*').in('student_id', ids).gte('date', weekAgo).order('date', { ascending: false })
+      setExSessions(ses || [])
+    }
     setLoading(false)
   }, [profile.id])
 
   useEffect(() => { loadAll() }, [loadAll])
 
+  const linkedStudents = allStudents.filter(s => s.teacher_id === profile.id)
+  const unlinkedStudents = allStudents.filter(s => !s.teacher_id)
+
+  const linkStudent = async (studentId) => {
+    const { error } = await supabase.from('profiles').update({ teacher_id: profile.id }).eq('id', studentId)
+    if (error) showToast({ type: 'error', title: 'Erro ao vincular', msg: error.message })
+    else { showToast({ type: 'success', title: '✅ Aluno vinculado!' }); await loadAll() }
+  }
+
+  const addContentManual = async (data) => {
+    const { data: newContent, error } = await supabase.from('content').insert({
+      lesson_id: data.lesson_id || null,
+      student_id: data.student_id,
+      teacher_id: profile.id,
+      type: data.type,
+      word: data.word || '',
+      definition: data.definition || '',
+      translation: data.translation || '',
+      example: data.example || '',
+      error_text: data.error_text || '',
+      correction: data.correction || '',
+      explanation: data.explanation || '',
+    }).select().single()
+
+    if (error) { showToast({ type: 'error', title: 'Erro ao salvar', msg: error.message }); return false }
+
+    if (newContent) {
+      const isCorrection = data.type === 'correction'
+      const front = isCorrection ? `Corrija: "${data.error_text}"` : data.word
+      const back = isCorrection
+        ? `✅ ${data.correction}\n\n📖 ${data.explanation}`
+        : [data.translation, data.definition ? `📖 ${data.definition}` : '', data.example ? `💬 "${data.example}"` : ''].filter(Boolean).join('\n\n')
+
+      await supabase.from('flashcards').insert({
+        content_id: newContent.id,
+        student_id: data.student_id,
+        type: data.type,
+        front,
+        back,
+      })
+    }
+    showToast({ type: 'success', title: '✅ Conteúdo e flashcard criados!' })
+    await loadAll()
+    return true
+  }
+
+  const deleteContent = async (contentId) => {
+    await supabase.from('content').delete().eq('id', contentId)
+    showToast({ type: 'info', title: 'Item removido' })
+    await loadAll()
+  }
+
   const pages = {
-    dash: <TDash profile={profile} students={students} lessons={lessons} content={content} flashcards={flashcards} />,
-    students: <TStudents profile={profile} students={students} reload={loadAll} toast={showToast} />,
-    lessons: <TLessons profile={profile} students={students} lessons={lessons} content={content} reload={loadAll} toast={showToast} />,
-    content: <TContent content={content} />,
-    sync: <TSync profile={profile} students={students} reload={loadAll} toast={showToast} />,
+    dash: <TDash profile={profile} linkedStudents={linkedStudents} unlinkedStudents={unlinkedStudents} lessons={lessons} content={content} flashcards={flashcards} exSessions={exSessions} setPage={setPage} />,
+    students: <TStudents profile={profile} linkedStudents={linkedStudents} unlinkedStudents={unlinkedStudents} content={content} exSessions={exSessions} onLink={linkStudent} onAddContent={addContentManual} reload={loadAll} toast={showToast} />,
+    lessons: <TLessons profile={profile} students={linkedStudents} lessons={lessons} content={content} reload={loadAll} toast={showToast} />,
+    content: <TContent content={content} students={linkedStudents} onAdd={addContentManual} onDelete={deleteContent} toast={showToast} />,
+    sync: <TSync profile={profile} reload={loadAll} toast={showToast} />,
   }
 
   return (
     <div style={{ background: C.bg, height: '100vh', display: 'flex', overflow: 'hidden' }}>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
       <Toast t={toast} />
-      {/* Sidebar */}
       <div style={{ width: nav ? 210 : 56, background: C.sidebar, display: 'flex', flexDirection: 'column', transition: 'width .2s', flexShrink: 0 }}>
         <div style={{ padding: '14px 10px', borderBottom: '1px solid rgba(255,255,255,.1)', display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={{ width: 36, height: 36, borderRadius: 10, background: C.orange, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>🧠</div>
@@ -88,6 +162,7 @@ export default function TeacherApp({ user, profile, onLogout }) {
         <nav style={{ flex: 1, padding: '10px 6px', overflowY: 'auto' }}>
           {NAV.map(it => <button key={it.id} onClick={() => setPage(it.id)} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '9px 8px', borderRadius: 8, border: 'none', background: page === it.id ? C.sidebarAct : 'transparent', color: page === it.id ? C.orange : 'rgba(243,230,210,.7)', fontSize: 13, fontWeight: page === it.id ? 700 : 400, cursor: 'pointer', marginBottom: 2, textAlign: 'left' }}>
             <span style={{ fontSize: 17, flexShrink: 0 }}>{it.icon}</span>{nav && <span>{it.label}</span>}
+            {it.id === 'students' && unlinkedStudents.length > 0 && <span style={{ marginLeft: 'auto', background: C.err, color: '#fff', fontSize: 10, fontWeight: 800, padding: '1px 6px', borderRadius: 10 }}>{unlinkedStudents.length}</span>}
           </button>)}
         </nav>
         <div style={{ padding: '10px 6px', borderTop: '1px solid rgba(255,255,255,.1)' }}>
@@ -103,11 +178,10 @@ export default function TeacherApp({ user, profile, onLogout }) {
           </button>
         </div>
       </div>
-      {/* Main */}
       <div style={{ flex: 1, overflowY: 'auto', background: C.bg }}>
         <div style={{ background: C.bg3, borderBottom: `1px solid ${C.bor}`, padding: '13px 22px', display: 'flex', alignItems: 'center', gap: 12, position: 'sticky', top: 0, zIndex: 100 }}>
           <div style={{ fontWeight: 700, fontSize: 16, color: C.green, flex: 1 }}>{NAV.find(n => n.id === page)?.label}</div>
-          <Tag col={C.sage}>● Online</Tag>
+          {unlinkedStudents.length > 0 && <Tag col={C.err}>⚠️ {unlinkedStudents.length} aluno(s) aguardando vínculo</Tag>}
         </div>
         <div style={{ padding: 24 }}>
           {loading ? <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div> : pages[page]}
@@ -117,34 +191,45 @@ export default function TeacherApp({ user, profile, onLogout }) {
   )
 }
 
-function TDash({ profile, students, lessons, content, flashcards }) {
+function TDash({ profile, linkedStudents, unlinkedStudents, lessons, content, flashcards, exSessions, setPage }) {
+  const thisWeek = exSessions.filter(s => s.date >= new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0])
   return <div>
     <div style={{ marginBottom: 22 }}>
       <h2 style={{ fontSize: 24, fontWeight: 900, color: C.green, margin: 0 }}>Olá, {profile.name.split(' ')[0]}! 👋</h2>
-      <p style={{ color: C.muted, fontSize: 13, marginTop: 4 }}>Resumo das atividades dos seus alunos</p>
+      <p style={{ color: C.muted, fontSize: 13, marginTop: 4 }}>Visão geral da sua turma</p>
     </div>
+    {unlinkedStudents.length > 0 && <div onClick={() => setPage('students')} style={{ ...crd, marginBottom: 18, background: C.err + '10', border: `1.5px solid ${C.err}44`, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12 }}>
+      <span style={{ fontSize: 28 }}>⚠️</span>
+      <div><div style={{ fontWeight: 700, color: C.err, fontSize: 14 }}>{unlinkedStudents.length} aluno(s) aguardando vínculo</div><div style={{ fontSize: 12, color: C.muted }}>Clique para ir à aba Alunos e vincular</div></div>
+    </div>}
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(120px,1fr))', gap: 12, marginBottom: 22 }}>
-      <Stat icon="👥" val={students.length} label="Alunos Ativos" col={C.green} />
+      <Stat icon="👥" val={linkedStudents.length} label="Alunos Ativos" col={C.green} />
       <Stat icon="📖" val={lessons.filter(l => l.processed).length} label="Aulas Processadas" col={C.orange} />
       <Stat icon="📚" val={content.length} label="Itens de Conteúdo" col={C.sage} />
-      <Stat icon="🃏" val={flashcards.length} label="Flashcards Criados" col={C.green} />
+      <Stat icon="✅" val={thisWeek.length} label="Exercícios (7 dias)" col={C.green} />
     </div>
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
       <div style={crd}>
-        <h3 style={{ fontSize: 14, fontWeight: 700, color: C.green, margin: '0 0 14px' }}>👥 Seus Alunos</h3>
-        {students.length === 0 ? <Empty icon="👥" msg="Nenhum aluno ainda" sub="Alunos se cadastram com seu e-mail" /> : students.map(s => (
-          <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: `1px solid ${C.bor}` }}>
+        <h3 style={{ fontSize: 14, fontWeight: 700, color: C.green, margin: '0 0 14px' }}>👥 Alunos Vinculados</h3>
+        {linkedStudents.length === 0 ? <Empty icon="👥" msg="Nenhum aluno vinculado" sub="Vá à aba Alunos para vincular" /> : linkedStudents.map(s => {
+          const stuSessions = exSessions.filter(e => e.student_id === s.id)
+          const lastEx = stuSessions[0]?.date
+          const stuContent = 0
+          return <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: `1px solid ${C.bor}` }}>
             <div style={{ width: 36, height: 36, borderRadius: 18, background: C.sage + '44', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, color: C.green, fontSize: 15, flexShrink: 0 }}>{s.name[0]}</div>
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 600, fontSize: 13, color: C.tx }}>{s.name}</div>
-              <div style={{ display: 'flex', gap: 5, marginTop: 3 }}><Tag col={C.green} sm>{s.level}</Tag><span style={{ fontSize: 10, color: C.muted }}>⚡{s.xp} XP</span></div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
+                {lastEx ? `Último exercício: ${fmt(lastEx)}` : 'Sem exercícios ainda'}
+              </div>
             </div>
+            <Tag col={stuSessions.length > 0 ? C.sage : C.muted} sm>{stuSessions.length > 0 ? '✓ ativo' : '− inativo'}</Tag>
           </div>
-        ))}
+        })}
       </div>
       <div style={crd}>
         <h3 style={{ fontSize: 14, fontWeight: 700, color: C.green, margin: '0 0 14px' }}>📖 Últimas Aulas</h3>
-        {lessons.length === 0 ? <Empty icon="📖" msg="Nenhuma aula" sub="Sync do Notion ou adicione manualmente" /> : lessons.slice(0, 6).map(l => (
+        {lessons.length === 0 ? <Empty icon="📖" msg="Nenhuma aula" sub="Use o Sync Zoom ou adicione manualmente" /> : lessons.slice(0, 6).map(l => (
           <div key={l.id} style={{ padding: '9px 0', borderBottom: `1px solid ${C.bor}` }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div><div style={{ fontSize: 13, fontWeight: 600, color: C.tx }}>{l.topic}</div><div style={{ fontSize: 11, color: C.muted }}>{fmt(l.date)}</div></div>
@@ -157,43 +242,92 @@ function TDash({ profile, students, lessons, content, flashcards }) {
   </div>
 }
 
-function TStudents({ profile, students, reload, toast }) {
-  const [modal, setModal] = useState(false)
-  const [info, setInfo] = useState('')
+function TStudents({ profile, linkedStudents, unlinkedStudents, content, exSessions, onLink, onAddContent, reload, toast }) {
+  const [addModal, setAddModal] = useState(null) // student object when open
+  const [form, setForm] = useState({ type: 'vocabulary', word: '', translation: '', definition: '', example: '', error_text: '', correction: '', explanation: '' })
+  const [saving, setSaving] = useState(false)
+  const set = k => e => setForm(p => ({ ...p, [k]: e.target.value }))
+
+  const handleAdd = async () => {
+    if (!form.word.trim() && !form.error_text.trim()) { toast({ type: 'error', title: 'Preencha o campo principal' }); return }
+    setSaving(true)
+    const ok = await onAddContent({ ...form, student_id: addModal.id })
+    if (ok) { setAddModal(null); setForm({ type: 'vocabulary', word: '', translation: '', definition: '', example: '', error_text: '', correction: '', explanation: '' }) }
+    setSaving(false)
+  }
+
+  const isCorrection = form.type === 'correction'
 
   return <div>
-    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 18 }}>
-      <span style={{ color: C.muted, fontSize: 13 }}>{students.length} aluno(s) vinculado(s)</span>
-      <button onClick={() => setModal(true)} style={bp()}>+ Como adicionar alunos?</button>
-    </div>
-    {students.length === 0
-      ? <Empty icon="👥" msg="Nenhum aluno ainda" sub="Compartilhe o link do app e peça que se cadastrem com seu e-mail como professora" />
-      : <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {students.map(s => {
-          const sCards = 0 // could load per student
-          return <div key={s.id} style={{ ...crd, display: 'flex', gap: 14, alignItems: 'center' }}>
-            <div style={{ width: 46, height: 46, borderRadius: 23, background: C.sage + '44', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, color: C.green, fontSize: 20, flexShrink: 0 }}>{s.name[0]}</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 700, fontSize: 15, color: C.tx }}>{s.name}</div>
-              <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>Cadastrado em {fmt(s.created_at?.split('T')[0])}</div>
-              <div style={{ display: 'flex', gap: 6, marginTop: 6 }}><Tag col={C.green}>{s.level}</Tag><Tag col={C.orange}>⚡{s.xp} XP</Tag><Tag col={C.orange}>🔥{s.streak}d</Tag></div>
+    {unlinkedStudents.length > 0 && <div style={{ ...crd, marginBottom: 20, border: `1.5px solid ${C.err}44`, background: C.err + '08' }}>
+      <h3 style={{ fontSize: 14, fontWeight: 700, color: C.err, margin: '0 0 12px' }}>⚠️ Aguardando vínculo ({unlinkedStudents.length})</h3>
+      <p style={{ fontSize: 12, color: C.muted, margin: '0 0 12px' }}>Estes alunos se cadastraram mas ainda não estão vinculados à sua conta. Clique em "Vincular" para adicioná-los à sua turma.</p>
+      {unlinkedStudents.map(s => <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: `1px solid ${C.bor}` }}>
+        <div style={{ width: 36, height: 36, borderRadius: 18, background: C.err + '22', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, color: C.err, fontSize: 15, flexShrink: 0 }}>{s.name[0]}</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 600, fontSize: 13 }}>{s.name}</div>
+          <div style={{ fontSize: 11, color: C.muted }}>ID Zoom: {s.zoom_meeting_id || '—'}</div>
+        </div>
+        <button onClick={() => onLink(s.id)} style={{ ...bp(C.green), padding: '7px 14px', fontSize: 12 }}>Vincular →</button>
+      </div>)}
+    </div>}
+
+    <div style={crd}>
+      <h3 style={{ fontSize: 14, fontWeight: 700, color: C.green, margin: '0 0 12px' }}>👥 Meus Alunos ({linkedStudents.length})</h3>
+      {linkedStudents.length === 0
+        ? <Empty icon="👥" msg="Nenhum aluno vinculado ainda" sub="Alunos cadastrados aparecerão acima para você vincular" />
+        : linkedStudents.map(s => {
+          const stuContent = content.filter(c => c.student_id === s.id)
+          const stuSessions = exSessions.filter(e => e.student_id === s.id)
+          const lastEx = stuSessions[0]?.date
+          const totalOk = stuSessions.reduce((a, b) => a + (b.score_ok || 0), 0)
+          const totalQ = stuSessions.reduce((a, b) => a + (b.score_total || 0), 0)
+          const pct = totalQ > 0 ? Math.round(totalOk / totalQ * 100) : null
+
+          return <div key={s.id} style={{ padding: '14px 0', borderBottom: `1px solid ${C.bor}` }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+              <div style={{ width: 42, height: 42, borderRadius: 21, background: C.sage + '44', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, color: C.green, fontSize: 18, flexShrink: 0 }}>{s.name[0]}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 15, color: C.tx }}>{s.name}</div>
+                <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
+                  ID Zoom: {s.zoom_meeting_id || '—'} · Nível: {s.level}
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                  <Tag col={C.green} sm>📚 {stuContent.length} itens</Tag>
+                  <Tag col={C.orange} sm>✏️ {stuSessions.length} exercícios</Tag>
+                  {pct !== null && <Tag col={pct >= 70 ? C.sage : C.err} sm>🎯 {pct}% acerto</Tag>}
+                  {lastEx
+                    ? <Tag col={C.muted} sm>Último: {fmt(lastEx)}</Tag>
+                    : <Tag col={C.muted} sm>Sem atividade</Tag>
+                  }
+                </div>
+              </div>
+              <button onClick={() => { setAddModal(s); setForm({ type: 'vocabulary', word: '', translation: '', definition: '', example: '', error_text: '', correction: '', explanation: '' }) }} style={{ ...bp(), padding: '7px 14px', fontSize: 12, flexShrink: 0 }}>+ Conteúdo</button>
             </div>
           </div>
         })}
+    </div>
+
+    <Modal open={!!addModal} onClose={() => setAddModal(null)} title={`+ Conteúdo para ${addModal?.name}`}>
+      <div style={{ marginBottom: 14 }}>
+        <Lbl>TIPO</Lbl>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {CONTENT_TYPES.map(t => <button key={t.value} onClick={() => setForm(p => ({ ...p, type: t.value }))} style={{ padding: '6px 14px', borderRadius: 20, border: `1.5px solid ${form.type === t.value ? t.col : C.bor}`, background: form.type === t.value ? t.col + '18' : 'transparent', color: form.type === t.value ? t.col : C.muted, fontWeight: form.type === t.value ? 700 : 400, cursor: 'pointer', fontSize: 12 }}>{t.label}</button>)}
+        </div>
       </div>
-    }
-    <Modal open={modal} onClose={() => setModal(false)} title="Como adicionar alunos">
-      <div style={{ fontSize: 14, color: C.tx, lineHeight: 1.8 }}>
-        <p style={{ marginBottom: 12 }}>Os alunos criam a própria conta no app. Você só precisa compartilhar o link e o seu e-mail:</p>
-        <div style={{ background: C.bg, borderRadius: 10, padding: 16, marginBottom: 16 }}>
-          <p style={{ fontSize: 13, fontWeight: 700, color: C.green, marginBottom: 8 }}>O que dizer ao aluno:</p>
-          <p style={{ fontSize: 13, color: C.tx, lineHeight: 1.7 }}>
-            "Acesse o link do LinguaFlow, clique em <strong>Cadastre-se</strong>, escolha <strong>Aluno(a)</strong> e coloque meu e-mail no campo <strong>E-mail da sua professora</strong>."
-          </p>
-        </div>
-        <div style={{ background: C.sage + '20', borderRadius: 10, padding: 12 }}>
-          <p style={{ fontSize: 12, color: C.green }}>📌 Seu e-mail de professora: <strong>{profile?.id}</strong></p>
-        </div>
+      {!isCorrection ? <>
+        <div style={{ marginBottom: 12 }}><Lbl>{form.type === 'grammar' ? 'PONTO GRAMATICAL' : 'PALAVRA / EXPRESSÃO'}</Lbl><input value={form.word} onChange={set('word')} style={inp} placeholder={form.type === 'phrasal_verb' ? 'Ex: bring up' : form.type === 'idiom' ? 'Ex: under the weather' : 'Ex: commitment'} /></div>
+        <div style={{ marginBottom: 12 }}><Lbl>TRADUÇÃO (PT-BR)</Lbl><input value={form.translation} onChange={set('translation')} style={inp} placeholder="Ex: compromisso" /></div>
+        <div style={{ marginBottom: 12 }}><Lbl>DEFINIÇÃO (EN)</Lbl><input value={form.definition} onChange={set('definition')} style={inp} placeholder="Ex: a promise or obligation to do something" /></div>
+        <div style={{ marginBottom: 20 }}><Lbl>EXEMPLO (opcional)</Lbl><input value={form.example} onChange={set('example')} style={inp} placeholder="Ex: She made a commitment to study every day." /></div>
+      </> : <>
+        <div style={{ marginBottom: 12 }}><Lbl>ERRO DO ALUNO</Lbl><input value={form.error_text} onChange={set('error_text')} style={inp} placeholder="Ex: She bring up a good point." /></div>
+        <div style={{ marginBottom: 12 }}><Lbl>CORREÇÃO</Lbl><input value={form.correction} onChange={set('correction')} style={inp} placeholder="Ex: She brought up a good point." /></div>
+        <div style={{ marginBottom: 20 }}><Lbl>EXPLICAÇÃO</Lbl><input value={form.explanation} onChange={set('explanation')} style={inp} placeholder="Ex: Past tense of 'bring up' + subject-verb agreement." /></div>
+      </>}
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+        <button onClick={() => setAddModal(null)} style={bs}>Cancelar</button>
+        <button onClick={handleAdd} disabled={saving} style={{ ...bp(), opacity: saving ? .7 : 1, display: 'flex', alignItems: 'center', gap: 6 }}>{saving ? <Spin /> : ''}💾 Salvar e criar flashcard</button>
       </div>
     </Modal>
   </div>
@@ -208,6 +342,7 @@ function TLessons({ profile, students, lessons, content, reload, toast }) {
   const doProcess = async (lessonId, transcript, studentId, topic) => {
     setProcessing(lessonId)
     try {
+      const { processLesson } = await import('../ai')
       const parsed = await processLesson(transcript, topic)
       const typeMap = { vocabulary: 'vocabulary', idioms: 'idiom', phrasal_verbs: 'phrasal_verb', grammar: 'grammar', corrections: 'correction' }
       const newContent = []
@@ -229,7 +364,7 @@ function TLessons({ profile, students, lessons, content, reload, toast }) {
       }
       await supabase.from('lessons').update({ processed: true, summary: parsed.summary || '' }).eq('id', lessonId)
       await reload()
-      toast({ type: 'success', title: '✅ Aula processada!', msg: `${newContent.length} itens · ${newContent.length} flashcards criados` })
+      toast({ type: 'success', title: '✅ Aula processada!', msg: `${newContent.length} itens criados` })
     } catch (e) { toast({ type: 'error', title: 'Erro ao processar', msg: e.message }) }
     setProcessing(null)
   }
@@ -247,7 +382,7 @@ function TLessons({ profile, students, lessons, content, reload, toast }) {
       <span style={{ color: C.muted, fontSize: 13 }}>{lessons.length} aula(s)</span>
       <button onClick={() => { setForm({ studentId: students[0]?.id || '', date: today(), topic: '', duration: 60, transcript: '' }); setModal(true) }} style={bp()}>+ Nova Aula</button>
     </div>
-    {lessons.length === 0 ? <Empty icon="📖" msg="Nenhuma aula" sub="Crie manualmente ou use Notion Sync" /> :
+    {lessons.length === 0 ? <Empty icon="📖" msg="Nenhuma aula" sub="Crie manualmente ou use o Sync Zoom" /> :
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {lessons.map(l => {
           const st = students.find(s => s.id === l.student_id)
@@ -255,63 +390,119 @@ function TLessons({ profile, students, lessons, content, reload, toast }) {
           const isP = processing === l.id
           return <div key={l.id} style={crd}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8, gap: 8, flexWrap: 'wrap' }}>
-              <div><div style={{ fontWeight: 700, fontSize: 16, color: C.tx }}>{l.topic}</div><div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{st?.name} · {fmt(l.date)} · {l.duration}min</div></div>
+              <div><div style={{ fontWeight: 700, fontSize: 16, color: C.tx }}>{l.topic}</div><div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{st?.name || 'Aluno'} · {fmt(l.date)} · {l.duration}min</div></div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                 <Tag col={l.processed ? C.sage : C.orange}>{l.processed ? '✅ Processada' : '⏳ Pendente'}</Tag>
-                {!l.processed && l.transcript && <button onClick={() => doProcess(l.id, l.transcript, l.student_id, l.topic)} disabled={!!processing} style={{ ...bp(C.green), padding: '6px 12px', fontSize: 12, opacity: isP ? .7 : 1, display: 'flex', alignItems: 'center', gap: 6 }}>{isP ? <Spin /> : '🧠'}{isP ? 'Processando...' : 'Processar'}</button>}
+                {!l.processed && l.transcript && <button onClick={() => doProcess(l.id, l.transcript, l.student_id, l.topic)} disabled={!!processing} style={{ ...bp(C.green), padding: '6px 12px', fontSize: 12, opacity: isP ? .7 : 1, display: 'flex', alignItems: 'center', gap: 6 }}>{isP ? <Spin /> : '🧠'}{isP ? 'Processando...' : 'Processar com IA'}</button>}
               </div>
             </div>
             {l.summary && <p style={{ fontSize: 13, color: C.muted, margin: '6px 0', lineHeight: 1.5 }}>{l.summary}</p>}
             {l.processed && <Tag col={C.sage}>📚 {cnt} itens gerados</Tag>}
           </div>
         })}
-      </div>
-    }
+      </div>}
     <Modal open={modal} onClose={() => setModal(false)} title="📖 Nova Aula">
       <div style={{ marginBottom: 14 }}><Lbl>ALUNO</Lbl>
-        <select value={form.studentId} onChange={set('studentId')} style={inp}><option value="">Selecione...</option>{students.map(s => <option key={s.id} value={s.id}>{s.name} ({s.level})</option>)}</select>
+        <select value={form.studentId} onChange={set('studentId')} style={inp}><option value="">Selecione...</option>{students.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 130px', gap: 10, marginBottom: 14 }}>
         <div><Lbl>TÓPICO</Lbl><input value={form.topic} onChange={set('topic')} style={inp} placeholder="Ex: Present Perfect" /></div>
         <div><Lbl>DATA</Lbl><input type="date" value={form.date} onChange={set('date')} style={inp} /></div>
       </div>
-      <div style={{ marginBottom: 14 }}><Lbl>TRANSCRIÇÃO (Claude extrai o conteúdo automaticamente)</Lbl>
-        <textarea value={form.transcript} onChange={set('transcript')} style={{ ...inp, minHeight: 110, resize: 'vertical', fontFamily: 'monospace', fontSize: 12 }} placeholder="Cole a transcrição da aula aqui..." />
+      <div style={{ marginBottom: 14 }}><Lbl>TRANSCRIÇÃO (opcional — Claude extrai conteúdo automaticamente)</Lbl>
+        <textarea value={form.transcript} onChange={set('transcript')} style={{ ...inp, minHeight: 100, resize: 'vertical', fontFamily: 'monospace', fontSize: 12 }} placeholder="Cole a transcrição ou resumo da aula aqui..." />
       </div>
       <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}><button onClick={() => setModal(false)} style={bs}>Cancelar</button><button onClick={save} style={bp()}>💾 Salvar</button></div>
     </Modal>
   </div>
 }
 
-function TContent({ content }) {
+function TContent({ content, students, onAdd, onDelete, toast }) {
   const [tab, setTab] = useState('vocabulary')
+  const [studentFilter, setStudentFilter] = useState('all')
+  const [addModal, setAddModal] = useState(false)
+  const [form, setForm] = useState({ student_id: students[0]?.id || '', type: 'vocabulary', word: '', translation: '', definition: '', example: '', error_text: '', correction: '', explanation: '' })
+  const [saving, setSaving] = useState(false)
+  const set = k => e => setForm(p => ({ ...p, [k]: e.target.value }))
+
   const types = { vocabulary: { label: 'Vocabulary', col: C.green }, idiom: { label: 'Idioms', col: C.orange }, phrasal_verb: { label: 'Phrasal Verbs', col: C.sage }, grammar: { label: 'Grammar', col: C.green }, correction: { label: 'Corrections', col: C.err } }
-  const filtered = content.filter(c => c.type === tab)
+
+  const filtered = content.filter(c => c.type === tab && (studentFilter === 'all' || c.student_id === studentFilter))
+  const isCorrection = form.type === 'correction'
+
+  const handleAdd = async () => {
+    if (!form.student_id) { toast({ type: 'error', title: 'Selecione um aluno' }); return }
+    if (!form.word.trim() && !form.error_text.trim()) { toast({ type: 'error', title: 'Preencha o campo principal' }); return }
+    setSaving(true)
+    await onAdd(form)
+    setAddModal(false)
+    setForm(p => ({ ...p, word: '', translation: '', definition: '', example: '', error_text: '', correction: '', explanation: '' }))
+    setSaving(false)
+  }
+
   return <div>
-    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 18 }}>
-      {Object.entries(types).map(([k, v]) => <button key={k} onClick={() => setTab(k)} style={{ padding: '6px 14px', borderRadius: 20, border: `1.5px solid ${tab === k ? v.col : C.bor}`, background: tab === k ? v.col + '18' : 'transparent', color: tab === k ? v.col : C.muted, fontSize: 13, fontWeight: tab === k ? 700 : 400, cursor: 'pointer' }}>
-        {v.label} ({content.filter(c => c.type === k).length})
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+      <select value={studentFilter} onChange={e => setStudentFilter(e.target.value)} style={{ ...inp, width: 'auto' }}>
+        <option value="all">Todos os alunos</option>
+        {students.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+      </select>
+      <button onClick={() => setAddModal(true)} style={bp()}>+ Adicionar conteúdo</button>
+    </div>
+    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+      {Object.entries(types).map(([k, v]) => <button key={k} onClick={() => setTab(k)} style={{ padding: '6px 14px', borderRadius: 20, border: `1.5px solid ${tab === k ? v.col : C.bor}`, background: tab === k ? v.col + '18' : 'transparent', color: tab === k ? v.col : C.muted, fontSize: 12, fontWeight: tab === k ? 700 : 400, cursor: 'pointer' }}>
+        {v.label} ({content.filter(c => c.type === k && (studentFilter === 'all' || c.student_id === studentFilter)).length})
       </button>)}
     </div>
-    {filtered.length === 0 ? <Empty icon="📚" msg="Nenhum item" sub="Processe uma aula para gerar conteúdo" /> :
+    {filtered.length === 0 ? <Empty icon="📚" msg="Nenhum item" sub="Processe uma aula ou adicione manualmente" /> :
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {filtered.map(item => <div key={item.id} style={{ ...crd, display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-          <div style={{ width: 8, height: 8, borderRadius: 4, background: types[tab]?.col || C.green, marginTop: 7, flexShrink: 0 }} />
-          <div>
-            <div style={{ fontWeight: 700, fontSize: 15, color: C.tx, marginBottom: 4 }}>
-              {tab === 'correction' ? <><span style={{ color: C.err }}>✗ {item.error_text}</span><span style={{ color: C.muted }}> → </span><span style={{ color: C.sage }}>✓ {item.correction}</span></> : item.word}
+        {filtered.map(item => {
+          const st = students.find(s => s.id === item.student_id)
+          return <div key={item.id} style={{ ...crd, display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+            <div style={{ width: 8, height: 8, borderRadius: 4, background: types[tab]?.col || C.green, marginTop: 7, flexShrink: 0 }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div style={{ fontWeight: 700, fontSize: 15, color: C.tx, marginBottom: 4 }}>
+                  {tab === 'correction' ? <><span style={{ color: C.err }}>✗ {item.error_text}</span><span style={{ color: C.muted }}> → </span><span style={{ color: C.sage }}>✓ {item.correction}</span></> : item.word}
+                </div>
+                {st && <Tag col={C.sage} sm>{st.name}</Tag>}
+              </div>
+              {tab !== 'correction' && item.translation && <div style={{ fontSize: 12, color: types[tab]?.col, marginBottom: 2, fontWeight: 600 }}>{item.translation}</div>}
+              {(tab === 'correction' ? item.explanation : item.definition) && <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5 }}>{tab === 'correction' ? item.explanation : item.definition}</div>}
+              {item.example && tab !== 'correction' && <div style={{ fontSize: 12, color: C.muted, fontStyle: 'italic', marginTop: 3 }}>💬 "{item.example}"</div>}
             </div>
-            {tab !== 'correction' && <div style={{ fontSize: 12, color: types[tab]?.col, marginBottom: 3, fontWeight: 600 }}>{item.translation}</div>}
-            <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5 }}>{tab === 'correction' ? item.explanation : item.definition}</div>
-            {item.example && tab !== 'correction' && <div style={{ fontSize: 12, color: C.muted, fontStyle: 'italic', marginTop: 4 }}>💬 "{item.example}"</div>}
+            <button onClick={() => onDelete(item.id)} style={{ background: 'none', border: 'none', color: C.muted, cursor: 'pointer', fontSize: 16, padding: 4, flexShrink: 0 }}>🗑</button>
           </div>
-        </div>)}
+        })}
+      </div>}
+
+    <Modal open={addModal} onClose={() => setAddModal(false)} title="+ Adicionar Conteúdo">
+      <div style={{ marginBottom: 14 }}><Lbl>ALUNO</Lbl>
+        <select value={form.student_id} onChange={set('student_id')} style={inp}><option value="">Selecione...</option>{students.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select>
       </div>
-    }
+      <div style={{ marginBottom: 14 }}><Lbl>TIPO</Lbl>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {CONTENT_TYPES.map(t => <button key={t.value} onClick={() => setForm(p => ({ ...p, type: t.value }))} style={{ padding: '6px 14px', borderRadius: 20, border: `1.5px solid ${form.type === t.value ? t.col : C.bor}`, background: form.type === t.value ? t.col + '18' : 'transparent', color: form.type === t.value ? t.col : C.muted, fontWeight: form.type === t.value ? 700 : 400, cursor: 'pointer', fontSize: 12 }}>{t.label}</button>)}
+        </div>
+      </div>
+      {!isCorrection ? <>
+        <div style={{ marginBottom: 12 }}><Lbl>PALAVRA / EXPRESSÃO</Lbl><input value={form.word} onChange={set('word')} style={inp} placeholder="Ex: commitment" /></div>
+        <div style={{ marginBottom: 12 }}><Lbl>TRADUÇÃO (PT-BR)</Lbl><input value={form.translation} onChange={set('translation')} style={inp} placeholder="Ex: compromisso" /></div>
+        <div style={{ marginBottom: 12 }}><Lbl>DEFINIÇÃO (EN)</Lbl><input value={form.definition} onChange={set('definition')} style={inp} placeholder="Ex: a promise to do something" /></div>
+        <div style={{ marginBottom: 20 }}><Lbl>EXEMPLO (opcional)</Lbl><input value={form.example} onChange={set('example')} style={inp} placeholder="Ex: She made a commitment to study." /></div>
+      </> : <>
+        <div style={{ marginBottom: 12 }}><Lbl>ERRO DO ALUNO</Lbl><input value={form.error_text} onChange={set('error_text')} style={inp} placeholder="Ex: She bring up a good point." /></div>
+        <div style={{ marginBottom: 12 }}><Lbl>CORREÇÃO</Lbl><input value={form.correction} onChange={set('correction')} style={inp} placeholder="Ex: She brought up a good point." /></div>
+        <div style={{ marginBottom: 20 }}><Lbl>EXPLICAÇÃO</Lbl><input value={form.explanation} onChange={set('explanation')} style={inp} placeholder="Ex: Passado de 'bring up' + concordância verbal." /></div>
+      </>}
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+        <button onClick={() => setAddModal(false)} style={bs}>Cancelar</button>
+        <button onClick={handleAdd} disabled={saving} style={{ ...bp(), opacity: saving ? .7 : 1, display: 'flex', alignItems: 'center', gap: 6 }}>{saving ? <Spin /> : ''}💾 Salvar + Flashcard</button>
+      </div>
+    </Modal>
   </div>
 }
 
-function TSync({ profile, students, reload, toast }) {
+function TSync({ profile, reload, toast }) {
   const [loading, setLoading] = useState(false)
   const [log, setLog] = useState([])
   const addLog = (msg, type = 'info') => setLog(p => [...p, { msg, type, t: new Date().toLocaleTimeString('pt-BR') }])
@@ -326,19 +517,18 @@ function TSync({ profile, students, reload, toast }) {
         body: JSON.stringify({ trigger: 'manual_app', timestamp: new Date().toISOString() })
       })
       if (!res.ok) throw new Error(`Erro ${res.status} — verifique se o workflow está ativo no n8n`)
-      addLog('✅ Sync iniciado! O n8n está buscando gravações do Zoom...', 'success')
-      addLog('🤖 Claude está analisando o conteúdo de cada aula...', 'info')
-      addLog('📝 Salvando no Notion e no banco de dados do app...', 'info')
-      addLog('⏱️ Pode levar 1-3 minutos. Esta janela pode ficar aberta.', 'warning')
+      addLog('✅ Sync iniciado! Buscando gravações do Zoom...', 'success')
+      addLog('🤖 Claude analisando conteúdo de cada aula...', 'info')
+      addLog('📝 Salvando no Notion e no app...', 'info')
+      addLog('⏱️ Pode levar 1-3 minutos...', 'warning')
       setTimeout(async () => {
         await reload()
-        addLog('🎉 Concluído! Verifique as novas aulas na aba Aulas.', 'success')
-        toast({ type: 'success', title: 'Sync concluído!', msg: 'Novas aulas adicionadas automaticamente' })
+        addLog('🎉 Concluído! Verifique as novas aulas.', 'success')
+        toast({ type: 'success', title: 'Sync concluído!' })
         setLoading(false)
       }, 15000)
     } catch (e) {
       addLog('❌ Erro: ' + e.message, 'error')
-      addLog('💡 Dica: abra o n8n e confirme que o workflow está ativo', 'info')
       toast({ type: 'error', title: 'Erro no sync', msg: e.message })
       setLoading(false)
     }
@@ -346,29 +536,20 @@ function TSync({ profile, students, reload, toast }) {
 
   const lc = { info: C.muted, success: C.sage, warning: C.orange, error: C.err }
   return <div>
-    <div style={{ ...crd, marginBottom: 18 }}>
+    <div style={{ ...crd, marginBottom: 14 }}>
       <h3 style={{ fontSize: 15, fontWeight: 700, color: C.green, margin: '0 0 8px' }}>🔄 Sincronizar Gravações do Zoom</h3>
-      <p style={{ fontSize: 13, color: C.muted, margin: '0 0 10px', lineHeight: 1.6 }}>
-        Busca as gravações recentes do Zoom, analisa com IA e salva automaticamente em:
+      <p style={{ fontSize: 13, color: C.muted, margin: '0 0 12px', lineHeight: 1.6 }}>
+        Busca as gravações recentes do Zoom, analisa com Claude e salva automaticamente no Notion e no banco de dados — vinculando ao aluno pelo ID da reunião.
       </p>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-        <Tag col={C.green}>📒 Notion (All Lessons + coluna Alunos)</Tag>
-        <Tag col={C.orange}>🗄️ Banco do app</Tag>
-        <Tag col={C.sage}>👤 Aluno vinculado pelo ID da reunião</Tag>
-      </div>
       <button onClick={doSync} disabled={loading} style={{ ...bp(C.green), opacity: loading ? .7 : 1, display: 'flex', alignItems: 'center', gap: 8 }}>
         {loading ? <Spin /> : '🔄'}{loading ? 'Sincronizando...' : 'Sincronizar Agora'}
       </button>
     </div>
-    <div style={{ ...crd, marginBottom: 14, background: C.bg }}>
-      <div style={{ fontSize: 12, color: C.tx, marginBottom: 4, fontWeight: 600 }}>📌 Vínculo automático de alunos</div>
-      <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.7 }}>
-        O n8n compara o ID da reunião Zoom com o campo <strong>"ID Reunião Zoom Fixo"</strong> na tabela Alunos do Notion.
-        Certifique-se de que cada aluno tem esse campo preenchido.
-      </div>
+    <div style={{ ...crd, marginBottom: 14, background: C.bg, fontSize: 12, color: C.muted, lineHeight: 1.7 }}>
+      <strong style={{ color: C.tx }}>📌 Vínculo automático de alunos:</strong> O ID da reunião Zoom (armazenado no perfil de cada aluno) é usado para identificar qual conteúdo pertence a qual aluno. Certifique-se de que cada aluno preencheu o ID correto ao se cadastrar.
     </div>
     {log.length > 0 && <div style={crd}>
-      <h4 style={{ fontSize: 13, fontWeight: 700, color: C.green, margin: '0 0 10px' }}>📋 Log do Sync</h4>
+      <h4 style={{ fontSize: 13, fontWeight: 700, color: C.green, margin: '0 0 10px' }}>📋 Log</h4>
       {log.map((l, i) => <div key={i} style={{ display: 'flex', gap: 10, padding: '5px 0', borderBottom: i < log.length - 1 ? `1px solid ${C.bor}` : 'none' }}>
         <span style={{ fontSize: 11, color: C.muted, fontFamily: 'monospace', flexShrink: 0 }}>{l.t}</span>
         <span style={{ fontSize: 12, color: lc[l.type] || C.muted }}>{l.msg}</span>
