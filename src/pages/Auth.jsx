@@ -16,9 +16,26 @@ export default function Auth() {
   const set = k => e => setForm(p => ({ ...p, [k]: e.target.value }))
 
   const handleLogin = async () => {
+    if (!form.email.trim() || !form.password) { setError('Preencha e-mail e senha.'); return }
     setLoading(true); setError('')
-    const { error } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password })
-    if (error) setError(error.message === 'Invalid login credentials' ? 'E-mail ou senha incorretos.' : error.message)
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: form.email.trim().toLowerCase(),
+        password: form.password
+      })
+      if (error) {
+        const msg = error.message === 'Invalid login credentials'
+          ? 'E-mail ou senha incorretos.'
+          : error.message === 'Email not confirmed'
+          ? 'E-mail não confirmado. Desative "Confirm email" no Supabase → Authentication → Providers → Email.'
+          : 'Erro: ' + error.message
+        setError(msg)
+      } else if (!data?.session) {
+        setError('Sessão não criada. Verifique as configurações do Supabase.')
+      }
+    } catch (e) {
+      setError('Erro de conexão com Supabase: ' + e.message)
+    }
     setLoading(false)
   }
 
