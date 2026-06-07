@@ -36,7 +36,7 @@ Include only items actually mentioned in the lesson. Use empty arrays if a categ
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6',
         max_tokens: 2000,
         system,
         messages: [
