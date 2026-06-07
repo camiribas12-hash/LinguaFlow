@@ -65,6 +65,8 @@ export default function TeacherApp({ user, profile, onLogout }) {
 
   const showToast = useCallback((t) => { setToast(t); setTimeout(() => setToast(null), 3500) }, [])
 
+  const [reviews, setReviews] = useState([])
+
   const loadAll = useCallback(async () => {
     setLoading(true)
     const [{ data: stu }, { data: les }, { data: con }, { data: fla }] = await Promise.all([
@@ -82,8 +84,12 @@ export default function TeacherApp({ user, profile, onLogout }) {
     if (students.length) {
       const ids = students.map(s => s.id)
       const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-      const { data: ses } = await supabase.from('exercise_sessions').select('*').in('student_id', ids).gte('date', weekAgo).order('date', { ascending: false })
+      const [{ data: ses }, { data: revs }] = await Promise.all([
+        supabase.from('exercise_sessions').select('*').in('student_id', ids).gte('date', weekAgo).order('date', { ascending: false }),
+        supabase.from('reviews').select('student_id, next_review, last_review, repetitions, ease_factor').in('student_id', ids)
+      ])
       setExSessions(ses || [])
+      setReviews(revs || [])
     }
     setLoading(false)
   }, [profile.id])
@@ -144,7 +150,7 @@ export default function TeacherApp({ user, profile, onLogout }) {
 
   const pages = {
     dash: <TDash profile={profile} linkedStudents={linkedStudents} unlinkedStudents={unlinkedStudents} lessons={lessons} content={content} flashcards={flashcards} exSessions={exSessions} setPage={setPage} />,
-    students: <TStudents profile={profile} linkedStudents={linkedStudents} unlinkedStudents={unlinkedStudents} content={content} exSessions={exSessions} onLink={linkStudent} onAddContent={addContentManual} reload={loadAll} toast={showToast} />,
+    students: <TStudents profile={profile} linkedStudents={linkedStudents} unlinkedStudents={unlinkedStudents} content={content} exSessions={exSessions} reviews={reviews} flashcards={flashcards} onLink={linkStudent} onAddContent={addContentManual} reload={loadAll} toast={showToast} />,
     lessons: <TLessons profile={profile} students={linkedStudents} lessons={lessons} content={content} reload={loadAll} toast={showToast} />,
     content: <TContent content={content} students={linkedStudents} onAdd={addContentManual} onDelete={deleteContent} toast={showToast} />,
     sync: <TSync profile={profile} reload={loadAll} toast={showToast} />,
@@ -242,11 +248,12 @@ function TDash({ profile, linkedStudents, unlinkedStudents, lessons, content, fl
   </div>
 }
 
-function TStudents({ profile, linkedStudents, unlinkedStudents, content, exSessions, onLink, onAddContent, reload, toast }) {
-  const [addModal, setAddModal] = useState(null) // student object when open
+function TStudents({ profile, linkedStudents, unlinkedStudents, content, exSessions, reviews, flashcards, onLink, onAddContent, reload, toast }) {
+  const [addModal, setAddModal] = useState(null)
   const [form, setForm] = useState({ type: 'vocabulary', word: '', translation: '', definition: '', example: '', error_text: '', correction: '', explanation: '' })
   const [saving, setSaving] = useState(false)
   const set = k => e => setForm(p => ({ ...p, [k]: e.target.value }))
+  const todayStr = today()
 
   const handleAdd = async () => {
     if (!form.word.trim() && !form.error_text.trim()) { toast({ type: 'error', title: 'Preencha o campo principal' }); return }
@@ -258,10 +265,35 @@ function TStudents({ profile, linkedStudents, unlinkedStudents, content, exSessi
 
   const isCorrection = form.type === 'correction'
 
+  // Calcula progresso por aluno
+  const getStudentStats = (studentId) => {
+    const stuCards = flashcards.filter(f => f.student_id === studentId)
+    const stuReviews = reviews.filter(r => r.student_id === studentId)
+    const stuSessions = exSessions.filter(e => e.student_id === studentId)
+    const stuContent = content.filter(c => c.student_id === studentId)
+
+    const totalCards = stuCards.length
+    const reviewedCards = stuReviews.filter(r => r.last_review).length
+    const dueToday = stuReviews.filter(r => r.next_review && r.next_review <= todayStr).length
+    const mastered = stuReviews.filter(r => (r.repetitions || 0) >= 3).length
+    const lastReview = stuReviews
+      .filter(r => r.last_review)
+      .sort((a, b) => b.last_review.localeCompare(a.last_review))[0]?.last_review
+
+    const totalExOk = stuSessions.reduce((a, b) => a + (b.score_ok || 0), 0)
+    const totalExTotal = stuSessions.reduce((a, b) => a + (b.score_total || 0), 0)
+    const exAccuracy = totalExTotal > 0 ? Math.round(totalExOk / totalExTotal * 100) : null
+    const lastActivity = [lastReview, stuSessions[0]?.date].filter(Boolean).sort().reverse()[0]
+
+    return { totalCards, reviewedCards, dueToday, mastered, exAccuracy, lastActivity, stuSessions: stuSessions.length, stuContent: stuContent.length }
+  }
+
+  const pct = (a, b) => b > 0 ? Math.round((a / b) * 100) : 0
+
   return <div>
     {unlinkedStudents.length > 0 && <div style={{ ...crd, marginBottom: 20, border: `1.5px solid ${C.err}44`, background: C.err + '08' }}>
       <h3 style={{ fontSize: 14, fontWeight: 700, color: C.err, margin: '0 0 12px' }}>⚠️ Aguardando vínculo ({unlinkedStudents.length})</h3>
-      <p style={{ fontSize: 12, color: C.muted, margin: '0 0 12px' }}>Estes alunos se cadastraram mas ainda não estão vinculados à sua conta. Clique em "Vincular" para adicioná-los à sua turma.</p>
+      <p style={{ fontSize: 12, color: C.muted, margin: '0 0 12px' }}>Estes alunos se cadastraram mas ainda não estão vinculados à sua conta.</p>
       {unlinkedStudents.map(s => <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: `1px solid ${C.bor}` }}>
         <div style={{ width: 36, height: 36, borderRadius: 18, background: C.err + '22', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, color: C.err, fontSize: 15, flexShrink: 0 }}>{s.name[0]}</div>
         <div style={{ flex: 1 }}>
@@ -272,41 +304,72 @@ function TStudents({ profile, linkedStudents, unlinkedStudents, content, exSessi
       </div>)}
     </div>}
 
-    <div style={crd}>
-      <h3 style={{ fontSize: 14, fontWeight: 700, color: C.green, margin: '0 0 12px' }}>👥 Meus Alunos ({linkedStudents.length})</h3>
-      {linkedStudents.length === 0
-        ? <Empty icon="👥" msg="Nenhum aluno vinculado ainda" sub="Alunos cadastrados aparecerão acima para você vincular" />
-        : linkedStudents.map(s => {
-          const stuContent = content.filter(c => c.student_id === s.id)
-          const stuSessions = exSessions.filter(e => e.student_id === s.id)
-          const lastEx = stuSessions[0]?.date
-          const totalOk = stuSessions.reduce((a, b) => a + (b.score_ok || 0), 0)
-          const totalQ = stuSessions.reduce((a, b) => a + (b.score_total || 0), 0)
-          const pct = totalQ > 0 ? Math.round(totalOk / totalQ * 100) : null
+    {linkedStudents.length === 0
+      ? <Empty icon="👥" msg="Nenhum aluno vinculado ainda" sub="Alunos cadastrados aparecerão acima para vincular" />
+      : linkedStudents.map(s => {
+        const stats = getStudentStats(s.id)
+        const progress = pct(stats.reviewedCards, stats.totalCards)
+        const progressCol = progress >= 80 ? C.sage : progress >= 40 ? C.orange : C.err
 
-          return <div key={s.id} style={{ padding: '14px 0', borderBottom: `1px solid ${C.bor}` }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
-              <div style={{ width: 42, height: 42, borderRadius: 21, background: C.sage + '44', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, color: C.green, fontSize: 18, flexShrink: 0 }}>{s.name[0]}</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: 15, color: C.tx }}>{s.name}</div>
-                <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
-                  ID Zoom: {s.zoom_meeting_id || '—'} · Nível: {s.level}
-                </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
-                  <Tag col={C.green} sm>📚 {stuContent.length} itens</Tag>
-                  <Tag col={C.orange} sm>✏️ {stuSessions.length} exercícios</Tag>
-                  {pct !== null && <Tag col={pct >= 70 ? C.sage : C.err} sm>🎯 {pct}% acerto</Tag>}
-                  {lastEx
-                    ? <Tag col={C.muted} sm>Último: {fmt(lastEx)}</Tag>
-                    : <Tag col={C.muted} sm>Sem atividade</Tag>
-                  }
-                </div>
+        return <div key={s.id} style={{ ...crd, marginBottom: 14 }}>
+          {/* Header do aluno */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
+            <div style={{ width: 44, height: 44, borderRadius: 22, background: C.sage + '44', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, color: C.green, fontSize: 20, flexShrink: 0 }}>{s.name[0]}</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 16, color: C.tx }}>{s.name}</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>ID Zoom: {s.zoom_meeting_id || '—'} · Nível: {s.level}</div>
+              <div style={{ fontSize: 11, color: stats.lastActivity ? C.green : C.muted, marginTop: 2 }}>
+                {stats.lastActivity ? `🕐 Última atividade: ${fmt(stats.lastActivity)}` : '○ Nenhuma atividade ainda'}
               </div>
-              <button onClick={() => { setAddModal(s); setForm({ type: 'vocabulary', word: '', translation: '', definition: '', example: '', error_text: '', correction: '', explanation: '' }) }} style={{ ...bp(), padding: '7px 14px', fontSize: 12, flexShrink: 0 }}>+ Conteúdo</button>
             </div>
+            <button onClick={() => { setAddModal(s); setForm({ type: 'vocabulary', word: '', translation: '', definition: '', example: '', error_text: '', correction: '', explanation: '' }) }} style={{ ...bp(), padding: '7px 14px', fontSize: 12, flexShrink: 0 }}>+ Conteúdo</button>
           </div>
-        })}
-    </div>
+
+          {/* Barra de progresso */}
+          {stats.totalCards > 0 && <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+              <span style={{ fontSize: 11, color: C.muted }}>Progresso de revisão</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: progressCol }}>{progress}%</span>
+            </div>
+            <div style={{ height: 8, background: C.bor, borderRadius: 4, marginBottom: 12 }}>
+              <div style={{ height: '100%', width: `${progress}%`, background: progressCol, borderRadius: 4, transition: 'width .4s' }} />
+            </div>
+          </>}
+
+          {/* Stats em grid */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+            {[
+              { icon: '🃏', val: stats.totalCards, label: 'Flashcards', col: C.green },
+              { icon: '✅', val: stats.reviewedCards, label: 'Revisados', col: C.sage },
+              { icon: '⏰', val: stats.dueToday, label: 'Pendentes hoje', col: stats.dueToday > 0 ? C.err : C.muted },
+              { icon: '🏆', val: stats.mastered, label: 'Dominados', col: C.orange },
+            ].map(({ icon, val, label, col }) => (
+              <div key={label} style={{ background: C.bg, borderRadius: 10, padding: '10px 8px', textAlign: 'center' }}>
+                <div style={{ fontSize: 18, marginBottom: 2 }}>{icon}</div>
+                <div style={{ fontSize: 20, fontWeight: 800, color: col }}>{val}</div>
+                <div style={{ fontSize: 9, color: C.muted, marginTop: 2, lineHeight: 1.3 }}>{label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Exercícios */}
+          {stats.stuSessions > 0 && <div style={{ marginTop: 10, padding: '8px 12px', background: C.bg, borderRadius: 10, display: 'flex', gap: 16 }}>
+            <span style={{ fontSize: 12, color: C.muted }}>✏️ {stats.stuSessions} exercício(s) na semana</span>
+            {stats.exAccuracy !== null && <span style={{ fontSize: 12, fontWeight: 700, color: stats.exAccuracy >= 70 ? C.sage : C.orange }}>🎯 {stats.exAccuracy}% acerto</span>}
+          </div>}
+
+          {/* Alerta se pendente */}
+          {stats.dueToday > 0 && <div style={{ marginTop: 8, padding: '6px 12px', background: C.err + '12', borderRadius: 8, fontSize: 12, color: C.err, fontWeight: 600 }}>
+            ⚠️ {stats.dueToday} card{stats.dueToday !== 1 ? 's' : ''} para revisar hoje — aluno ainda não fez
+          </div>}
+          {stats.totalCards > 0 && stats.reviewedCards === 0 && <div style={{ marginTop: 8, padding: '6px 12px', background: C.orange + '12', borderRadius: 8, fontSize: 12, color: C.orange }}>
+            📌 Aluno ainda não iniciou as revisões
+          </div>}
+          {stats.totalCards === 0 && <div style={{ marginTop: 8, padding: '6px 12px', background: C.bor, borderRadius: 8, fontSize: 12, color: C.muted }}>
+            📭 Sem flashcards ainda — processe uma aula para gerar conteúdo
+          </div>}
+        </div>
+      })}
 
     <Modal open={!!addModal} onClose={() => setAddModal(null)} title={`+ Conteúdo para ${addModal?.name}`}>
       <div style={{ marginBottom: 14 }}>
@@ -318,12 +381,12 @@ function TStudents({ profile, linkedStudents, unlinkedStudents, content, exSessi
       {!isCorrection ? <>
         <div style={{ marginBottom: 12 }}><Lbl>{form.type === 'grammar' ? 'PONTO GRAMATICAL' : 'PALAVRA / EXPRESSÃO'}</Lbl><input value={form.word} onChange={set('word')} style={inp} placeholder={form.type === 'phrasal_verb' ? 'Ex: bring up' : form.type === 'idiom' ? 'Ex: under the weather' : 'Ex: commitment'} /></div>
         <div style={{ marginBottom: 12 }}><Lbl>TRADUÇÃO (PT-BR)</Lbl><input value={form.translation} onChange={set('translation')} style={inp} placeholder="Ex: compromisso" /></div>
-        <div style={{ marginBottom: 12 }}><Lbl>DEFINIÇÃO (EN)</Lbl><input value={form.definition} onChange={set('definition')} style={inp} placeholder="Ex: a promise or obligation to do something" /></div>
-        <div style={{ marginBottom: 20 }}><Lbl>EXEMPLO (opcional)</Lbl><input value={form.example} onChange={set('example')} style={inp} placeholder="Ex: She made a commitment to study every day." /></div>
+        <div style={{ marginBottom: 12 }}><Lbl>DEFINIÇÃO (EN)</Lbl><input value={form.definition} onChange={set('definition')} style={inp} placeholder="Ex: a promise to do something" /></div>
+        <div style={{ marginBottom: 20 }}><Lbl>EXEMPLO (opcional)</Lbl><input value={form.example} onChange={set('example')} style={inp} placeholder="Ex: She made a commitment to study." /></div>
       </> : <>
         <div style={{ marginBottom: 12 }}><Lbl>ERRO DO ALUNO</Lbl><input value={form.error_text} onChange={set('error_text')} style={inp} placeholder="Ex: She bring up a good point." /></div>
         <div style={{ marginBottom: 12 }}><Lbl>CORREÇÃO</Lbl><input value={form.correction} onChange={set('correction')} style={inp} placeholder="Ex: She brought up a good point." /></div>
-        <div style={{ marginBottom: 20 }}><Lbl>EXPLICAÇÃO</Lbl><input value={form.explanation} onChange={set('explanation')} style={inp} placeholder="Ex: Past tense of 'bring up' + subject-verb agreement." /></div>
+        <div style={{ marginBottom: 20 }}><Lbl>EXPLICAÇÃO</Lbl><input value={form.explanation} onChange={set('explanation')} style={inp} placeholder="Ex: Past tense of bring up." /></div>
       </>}
       <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
         <button onClick={() => setAddModal(null)} style={bs}>Cancelar</button>
