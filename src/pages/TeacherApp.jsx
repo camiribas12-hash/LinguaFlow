@@ -337,9 +337,13 @@ function TLessons({ profile, students, lessons, content, reload, toast }) {
   const [modal, setModal] = useState(false)
   const [processing, setProcessing] = useState(null)
   const [form, setForm] = useState({ studentId: '', date: today(), topic: '', duration: 60, transcript: '' })
+  // Seletor de aluno para aulas sem student_id
+  const [lessonStudentMap, setLessonStudentMap] = useState({})
   const set = k => e => setForm(p => ({ ...p, [k]: e.target.value }))
 
   const doProcess = async (lessonId, transcript, studentId, topic) => {
+    if (!studentId) { toast({ type: 'error', title: 'Selecione um aluno antes de processar' }); return }
+    if (!transcript || transcript.trim().length < 20) { toast({ type: 'error', title: 'Aula sem transcrição', msg: 'Adicione a transcrição para processar com IA.' }); return }
     setProcessing(lessonId)
     try {
       const { processLesson } = await import('../ai')
@@ -348,30 +352,52 @@ function TLessons({ profile, students, lessons, content, reload, toast }) {
       const newContent = []
       for (const [k, type] of Object.entries(typeMap)) {
         for (const item of (parsed[k] || [])) {
-          newContent.push({ lesson_id: lessonId, student_id: studentId, teacher_id: profile.id, type, word: item.word || item.correction || '', definition: item.definition || '', translation: item.translation || '', example: item.example || '', error_text: item.error_text || item.errorText || '', correction: item.correction || '', explanation: item.explanation || '' })
+          if (!item.word && !item.correction) continue
+          newContent.push({
+            lesson_id: lessonId, student_id: studentId, teacher_id: profile.id, type,
+            word: item.word || item.correction || '',
+            definition: item.definition || '',
+            translation: item.translation || '',
+            example: item.example || '',
+            error_text: item.error_text || item.errorText || '',
+            correction: item.correction || '',
+            explanation: item.explanation || ''
+          })
         }
       }
       if (newContent.length) {
         const { data: savedContent } = await supabase.from('content').insert(newContent).select()
         if (savedContent?.length) {
           const cards = savedContent.map(item => ({
-            content_id: item.id, student_id: studentId, type: item.type,
+            content_id: item.id,
+            student_id: studentId,
+            type: item.type,
             front: item.type === 'correction' ? `Corrija: "${item.error_text}"` : item.word,
-            back: item.type === 'correction' ? `✅ ${item.correction}\n\n📖 ${item.explanation}` : `${item.translation}\n\n📖 ${item.definition}\n\n💬 ${item.example}`,
+            back: item.type === 'correction'
+              ? `✅ ${item.correction}\n\n📖 ${item.explanation}`
+              : [item.translation, item.definition ? `📖 ${item.definition}` : '', item.example ? `💬 "${item.example}"` : ''].filter(Boolean).join('\n\n'),
           }))
           await supabase.from('flashcards').insert(cards)
         }
       }
-      await supabase.from('lessons').update({ processed: true, summary: parsed.summary || '' }).eq('id', lessonId)
+      // Atualiza a aula como processada e vincula ao aluno se necessário
+      await supabase.from('lessons')
+        .update({ processed: true, summary: parsed.summary || '', student_id: studentId })
+        .eq('id', lessonId)
       await reload()
-      toast({ type: 'success', title: '✅ Aula processada!', msg: `${newContent.length} itens criados` })
-    } catch (e) { toast({ type: 'error', title: 'Erro ao processar', msg: e.message }) }
+      toast({ type: 'success', title: '✅ Aula processada!', msg: `${newContent.length} itens · flashcards criados para o aluno` })
+    } catch (e) {
+      toast({ type: 'error', title: 'Erro ao processar', msg: e.message })
+    }
     setProcessing(null)
   }
 
   const save = async () => {
     if (!form.topic.trim() || !form.studentId) { toast({ type: 'error', title: 'Tópico e aluno são obrigatórios' }); return }
-    const { data: nl } = await supabase.from('lessons').insert({ teacher_id: profile.id, student_id: form.studentId, date: form.date, topic: form.topic, duration: Number(form.duration), transcript: form.transcript, processed: false }).select().single()
+    const { data: nl } = await supabase.from('lessons').insert({
+      teacher_id: profile.id, student_id: form.studentId, date: form.date,
+      topic: form.topic, duration: Number(form.duration), transcript: form.transcript, processed: false
+    }).select().single()
     setModal(false)
     if (nl && form.transcript.trim().length > 30) await doProcess(nl.id, form.transcript, form.studentId, form.topic)
     else { await reload(); toast({ type: 'success', title: 'Aula salva!' }) }
@@ -388,31 +414,75 @@ function TLessons({ profile, students, lessons, content, reload, toast }) {
           const st = students.find(s => s.id === l.student_id)
           const cnt = content.filter(c => c.lesson_id === l.id).length
           const isP = processing === l.id
+          // Aluno selecionado para aulas sem student_id
+          const selectedStudentId = l.student_id || lessonStudentMap[l.id] || ''
+          const hasStudent = !!selectedStudentId
+
           return <div key={l.id} style={crd}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8, gap: 8, flexWrap: 'wrap' }}>
-              <div><div style={{ fontWeight: 700, fontSize: 16, color: C.tx }}>{l.topic}</div><div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{st?.name || 'Aluno'} · {fmt(l.date)} · {l.duration}min</div></div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <Tag col={l.processed ? C.sage : C.orange}>{l.processed ? '✅ Processada' : '⏳ Pendente'}</Tag>
-                {!l.processed && l.transcript && <button onClick={() => doProcess(l.id, l.transcript, l.student_id, l.topic)} disabled={!!processing} style={{ ...bp(C.green), padding: '6px 12px', fontSize: 12, opacity: isP ? .7 : 1, display: 'flex', alignItems: 'center', gap: 6 }}>{isP ? <Spin /> : '🧠'}{isP ? 'Processando...' : 'Processar com IA'}</button>}
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 16, color: C.tx }}>{l.topic}</div>
+                <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+                  {st?.name || <span style={{ color: C.err }}>⚠️ Aluno não vinculado</span>} · {fmt(l.date)} · {l.duration}min
+                </div>
               </div>
+              <Tag col={l.processed ? C.sage : C.orange}>{l.processed ? '✅ Processada' : '⏳ Pendente'}</Tag>
             </div>
+
+            {/* Seletor de aluno para aulas sem student_id */}
+            {!l.student_id && (
+              <div style={{ marginBottom: 10, padding: '8px 12px', background: C.err + '10', borderRadius: 10, border: `1px solid ${C.err}33` }}>
+                <div style={{ fontSize: 11, color: C.err, fontWeight: 700, marginBottom: 6 }}>⚠️ Selecione o aluno desta aula para criar os flashcards:</div>
+                <select
+                  value={lessonStudentMap[l.id] || ''}
+                  onChange={e => setLessonStudentMap(prev => ({ ...prev, [l.id]: e.target.value }))}
+                  style={{ ...inp, fontSize: 12, padding: '7px 10px' }}
+                >
+                  <option value="">Selecionar aluno...</option>
+                  {students.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </div>
+            )}
+
             {l.summary && <p style={{ fontSize: 13, color: C.muted, margin: '6px 0', lineHeight: 1.5 }}>{l.summary}</p>}
-            {l.processed && <Tag col={C.sage}>📚 {cnt} itens gerados</Tag>}
+            {l.processed && cnt > 0 && <Tag col={C.sage}>📚 {cnt} itens gerados</Tag>}
+
+            {!l.processed && (
+              <div style={{ marginTop: 10 }}>
+                {hasStudent ? (
+                  <button
+                    onClick={() => doProcess(l.id, l.transcript || l.summary, selectedStudentId, l.topic)}
+                    disabled={!!processing}
+                    style={{ ...bp(C.green), padding: '7px 14px', fontSize: 12, opacity: isP ? .7 : 1, display: 'flex', alignItems: 'center', gap: 6 }}
+                  >
+                    {isP ? <Spin /> : '🧠'}{isP ? 'Processando...' : 'Processar com IA'}
+                  </button>
+                ) : (
+                  <div style={{ fontSize: 12, color: C.muted }}>Selecione um aluno acima para processar</div>
+                )}
+              </div>
+            )}
           </div>
         })}
-      </div>}
+      </div>
+    }
     <Modal open={modal} onClose={() => setModal(false)} title="📖 Nova Aula">
       <div style={{ marginBottom: 14 }}><Lbl>ALUNO</Lbl>
-        <select value={form.studentId} onChange={set('studentId')} style={inp}><option value="">Selecione...</option>{students.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select>
+        <select value={form.studentId} onChange={set('studentId')} style={inp}>
+          <option value="">Selecione...</option>{students.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 130px', gap: 10, marginBottom: 14 }}>
         <div><Lbl>TÓPICO</Lbl><input value={form.topic} onChange={set('topic')} style={inp} placeholder="Ex: Present Perfect" /></div>
         <div><Lbl>DATA</Lbl><input type="date" value={form.date} onChange={set('date')} style={inp} /></div>
       </div>
-      <div style={{ marginBottom: 14 }}><Lbl>TRANSCRIÇÃO (opcional — Claude extrai conteúdo automaticamente)</Lbl>
+      <div style={{ marginBottom: 14 }}><Lbl>TRANSCRIÇÃO (Claude extrai conteúdo automaticamente)</Lbl>
         <textarea value={form.transcript} onChange={set('transcript')} style={{ ...inp, minHeight: 100, resize: 'vertical', fontFamily: 'monospace', fontSize: 12 }} placeholder="Cole a transcrição ou resumo da aula aqui..." />
       </div>
-      <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}><button onClick={() => setModal(false)} style={bs}>Cancelar</button><button onClick={save} style={bp()}>💾 Salvar</button></div>
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+        <button onClick={() => setModal(false)} style={bs}>Cancelar</button>
+        <button onClick={save} style={bp()}>💾 Salvar</button>
+      </div>
     </Modal>
   </div>
 }
