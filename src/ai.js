@@ -19,18 +19,17 @@ export async function callClaude(prompt, system = '', history = [], mcp = []) {
 }
 
 export async function processLesson(transcript, topic) {
-  const sys = `You are an English teacher AI. Analyze this lesson transcript.
-Return ONLY valid JSON (no markdown, no backticks):
-{"vocabulary":[{"word":"","definition":"","translation":"","example":""}],
-"idioms":[{"word":"","definition":"","translation":"","example":""}],
-"phrasal_verbs":[{"word":"","definition":"","translation":"","example":""}],
-"grammar":[{"word":"","definition":"","translation":"","example":""}],
-"corrections":[{"error_text":"","correction":"","word":"","explanation":""}],
-"summary":""}`
-  const { txt } = await callClaude(`Topic: ${topic}\n\nTranscript:\n${transcript}`, sys)
-  const m = txt.replace(/```[\w]*\n?|```/g, '').match(/\{[\s\S]*\}/)
-  if (!m) throw new Error('No JSON in AI response')
-  return JSON.parse(m[0])
+  // Chama via servidor Vercel para evitar bloqueio CORS
+  const res = await fetch('/api/process-lesson', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ transcript, topic })
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.error || `Erro ${res.status}`)
+  }
+  return await res.json()
 }
 
 export async function fetchNotionLessons() {
