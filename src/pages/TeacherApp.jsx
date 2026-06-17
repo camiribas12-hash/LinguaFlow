@@ -644,7 +644,7 @@ function TSync({ profile, reload, toast }) {
     setLoading(true); setLog([])
     addLog('🔄 Conectando ao n8n...')
     try {
-      const res = await fetch('https://camiteaching.app.n8n.cloud/webhook/sync-zoom-lessons', {
+      const res = await fetch('https://n8n-production-7ed8.up.railway.app/webhook/sync-zoom-lessons', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ trigger: 'manual_app', timestamp: new Date().toISOString() })
