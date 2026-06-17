@@ -14,24 +14,34 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Chave da API não configurada no servidor.' })
   }
 
+  // Use pipe-delimited format instead of JSON — avoids all JSON parsing issues
   const system = `You are an English teacher AI assistant. Analyze the lesson transcript.
-Return ONLY a valid JSON object. Follow these rules STRICTLY:
-- No markdown, no backticks, no explanation outside the JSON
-- All string values must be on a SINGLE LINE (no line breaks inside strings)
-- Use only double quotes for strings
-- Keep all text fields under 150 characters
-- If a field has no content, use empty string ""
+Return ONLY the structured text below. No JSON. No markdown. No extra explanation.
+Each item on its own line using pipe | as separator. Keep each field under 120 characters. No line breaks within fields.
 
-JSON format:
-{
-  "vocabulary": [{"word": "", "definition": "", "translation": "", "example": ""}],
-  "idioms": [{"word": "", "definition": "", "translation": "", "example": ""}],
-  "phrasal_verbs": [{"word": "", "definition": "", "translation": "", "example": ""}],
-  "grammar": [{"word": "", "definition": "", "translation": "", "example": ""}],
-  "corrections": [{"error_text": "", "correction": "", "word": "", "explanation": ""}],
-  "summary": ""
-}
-Include only items actually mentioned in the lesson. Use empty arrays [] for unused categories.`
+[VOCABULARY]
+word: X | translation: X | definition: X | example: X
+
+[IDIOMS]
+word: X | translation: X | definition: X | example: X
+
+[PHRASAL_VERBS]
+word: X | translation: X | definition: X | example: X
+
+[GRAMMAR]
+point: X | explanation: X | example: X
+
+[CORRECTIONS]
+error: X | correction: X | explanation: X
+
+[SUMMARY]
+One paragraph summary of the lesson here.
+
+Rules:
+- Only include sections that have real content from the lesson
+- If a section is empty, write the header and leave it blank
+- Never use quotes or special characters that could break formatting
+- Keep it simple and direct`
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -48,7 +58,7 @@ Include only items actually mentioned in the lesson. Use empty arrays [] for unu
         messages: [
           {
             role: 'user',
-            content: `Topic: ${topic || 'English Lesson'}\n\nTranscript:\n${transcript.substring(0, 6000)}`,
+            content: `Topic: ${(topic || 'English Lesson').substring(0, 200)}\n\nTranscript:\n${transcript.substring(0, 5000)}`,
           },
         ],
       }),
@@ -60,7 +70,6 @@ Include only items actually mentioned in the lesson. Use empty arrays [] for unu
     }
 
     const data = await response.json()
-
     if (data.error) {
       return res.status(400).json({ error: data.error.message })
     }
@@ -70,99 +79,98 @@ Include only items actually mentioned in the lesson. Use empty arrays [] for unu
       .map(b => b.text)
       .join('')
 
-    const parsed = robustJSONParse(rawText)
-
-    if (!parsed) {
-      return res.status(500).json({ error: 'Resposta da IA em formato inesperado. Tente novamente.' })
-    }
-
+    const parsed = parsePipeFormat(rawText)
     return res.status(200).json(parsed)
+
   } catch (error) {
     return res.status(500).json({ error: error.message || 'Erro interno ao processar.' })
   }
 }
 
-/**
- * Robust JSON parser that handles common AI output issues:
- * - Markdown code blocks
- * - Trailing commas
- * - Unescaped newlines inside strings
- * - Extra content before/after JSON
- */
-function robustJSONParse(text) {
-  // Step 1: Remove markdown code blocks
-  let cleaned = text
-    .replace(/```json\s*/gi, '')
-    .replace(/```\s*/gi, '')
-    .trim()
-
-  // Step 2: Try direct parse first
-  try { return JSON.parse(cleaned) } catch (e) {}
-
-  // Step 3: Find the JSON block using brace counting (more reliable than regex)
-  const jsonBlock = extractJSONBlock(cleaned)
-  if (!jsonBlock) return null
-
-  // Step 4: Try parsing the extracted block
-  try { return JSON.parse(jsonBlock) } catch (e) {}
-
-  // Step 5: Apply fixes and try again
-  const fixed = applyJSONFixes(jsonBlock)
-  try { return JSON.parse(fixed) } catch (e) {}
-
-  // Step 6: More aggressive cleanup
-  const aggressive = aggressiveClean(fixed)
-  try { return JSON.parse(aggressive) } catch (e) {
-    console.error('All JSON parse attempts failed:', e.message)
-    return null
+function parsePipeFormat(text) {
+  const result = {
+    vocabulary: [],
+    idioms: [],
+    phrasal_verbs: [],
+    grammar: [],
+    corrections: [],
+    summary: ''
   }
-}
 
-function extractJSONBlock(text) {
-  let depth = 0
-  let start = -1
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]
-    if (ch === '{') {
-      if (depth === 0) start = i
-      depth++
-    } else if (ch === '}') {
-      depth--
-      if (depth === 0 && start !== -1) {
-        return text.substring(start, i + 1)
+  // Extract each section
+  const sections = {
+    VOCABULARY: 'vocabulary',
+    IDIOMS: 'idioms',
+    PHRASAL_VERBS: 'phrasal_verbs',
+    GRAMMAR: 'grammar',
+    CORRECTIONS: 'corrections',
+    SUMMARY: 'summary'
+  }
+
+  for (const [sectionKey, resultKey] of Object.entries(sections)) {
+    const pattern = new RegExp(`\\[${sectionKey}\\]([\\s\\S]*?)(?=\\[|$)`, 'i')
+    const match = text.match(pattern)
+    if (!match) continue
+
+    const block = match[1].trim()
+
+    if (resultKey === 'summary') {
+      result.summary = block.replace(/\n/g, ' ').trim()
+      continue
+    }
+
+    const lines = block.split('\n').map(l => l.trim()).filter(l => l.includes(':') && l.includes('|'))
+
+    for (const line of lines) {
+      const fields = parsePipeLine(line)
+      if (!fields) continue
+
+      if (resultKey === 'vocabulary' || resultKey === 'idioms' || resultKey === 'phrasal_verbs') {
+        const word = fields.word || fields.point || ''
+        if (word) {
+          result[resultKey].push({
+            word,
+            definition: fields.definition || '',
+            translation: fields.translation || '',
+            example: fields.example || ''
+          })
+        }
+      } else if (resultKey === 'grammar') {
+        const word = fields.point || fields.word || fields.grammar || ''
+        if (word) {
+          result.grammar.push({
+            word,
+            definition: fields.explanation || fields.definition || '',
+            translation: '',
+            example: fields.example || ''
+          })
+        }
+      } else if (resultKey === 'corrections') {
+        const errorText = fields.error || fields.error_text || ''
+        if (errorText) {
+          result.corrections.push({
+            word: fields.correction || errorText,
+            error_text: errorText,
+            correction: fields.correction || '',
+            explanation: fields.explanation || ''
+          })
+        }
       }
     }
   }
-  return null
-}
 
-function applyJSONFixes(jsonStr) {
-  return jsonStr
-    // Remove trailing commas before } or ]
-    .replace(/,(\s*[}\]])/g, '$1')
-    // Fix unescaped newlines inside strings (replace with space)
-    .replace(/"([^"\\]*)(?:\\.[^"\\]*)*"/g, match =>
-      match.replace(/\n/g, ' ').replace(/\r/g, '')
-    )
-    // Remove control characters
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
-}
-
-function aggressiveClean(jsonStr) {
-  // Replace ALL literal newlines within string values with spaces
-  let result = ''
-  let inString = false
-  let escaped = false
-  for (let i = 0; i < jsonStr.length; i++) {
-    const ch = jsonStr[i]
-    if (escaped) { result += ch; escaped = false; continue }
-    if (ch === '\\') { result += ch; escaped = true; continue }
-    if (ch === '"') { inString = !inString; result += ch; continue }
-    if (inString && (ch === '\n' || ch === '\r')) {
-      result += ' '
-    } else {
-      result += ch
-    }
-  }
   return result
+}
+
+function parsePipeLine(line) {
+  const parts = line.split('|')
+  const obj = {}
+  for (const part of parts) {
+    const colonIdx = part.indexOf(':')
+    if (colonIdx === -1) continue
+    const key = part.substring(0, colonIdx).trim().toLowerCase().replace(/[\s-]+/g, '_')
+    const value = part.substring(colonIdx + 1).trim()
+    if (key && value) obj[key] = value
+  }
+  return Object.keys(obj).length > 0 ? obj : null
 }
