@@ -48,31 +48,21 @@ Use empty string for missing fields.`
 
 export async function generateExercises(content) {
   if (!content.length) return []
-  const vocab = content.filter(c => c.type === 'vocabulary').slice(-12)
-  const pvs = content.filter(c => c.type === 'phrasal_verb').slice(-6)
-  const cors = content.filter(c => c.type === 'correction').slice(-6)
-  const idioms = content.filter(c => c.type === 'idiom').slice(-4)
-
-  const contentStr = [
-    ...vocab.map(c => `vocabulary: "${c.word}" = ${c.translation} | ${c.definition}`),
-    ...pvs.map(c => `phrasal_verb: "${c.word}" = ${c.translation}`),
-    ...cors.map(c => `correction: WRONG="${c.error_text}" → CORRECT="${c.correction}" | ${c.explanation}`),
-    ...idioms.map(c => `idiom: "${c.word}" = ${c.translation}`),
-  ].join('\n')
-
-  const sys = `English teacher. Create 10 exercises. Return ONLY a JSON array (no markdown):
-[
-  {"type":"multiple_choice","question":"What does X mean?","options":["a","b","c","d"],"correct":0,"explanation":"..."},
-  {"type":"error_correction","sentence":"She bring up a point.","correct":"She brings up a point.","explanation":"3rd person -s"},
-  {"type":"fill_blank","sentence":"They ___ the project.","answer":"carried on","hint":"to continue","explanation":"carry on = continuar"},
-  {"type":"true_false","statement":"Commitment means to give up.","correct":false,"explanation":"Commitment = compromisso"}
-]
-Mix all 4 types. Use ONLY the provided content.`
-
-  const { txt } = await callClaude(`Student content:\n${contentStr}`, sys)
-  const m = txt.replace(/```[\w]*\n?|```/g, '').match(/\[[\s\S]*\]/)
-  if (!m) return []
-  try { return JSON.parse(m[0]) } catch { return [] }
+  // Rota pelo servidor Vercel (evita bloqueio CORS do navegador)
+  const res = await fetch('/api/generate-exercises', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content })
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.error || `Erro ${res.status}`)
+  }
+  const exercises = await res.json()
+  if (!Array.isArray(exercises) || exercises.length === 0) {
+    throw new Error('Nenhum exercício gerado. Tente novamente.')
+  }
+  return exercises
 }
 
 // SM-2 Algorithm — quality scale 0-5 (standard):
