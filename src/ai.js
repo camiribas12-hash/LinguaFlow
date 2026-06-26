@@ -75,14 +75,20 @@ Mix all 4 types. Use ONLY the provided content.`
   try { return JSON.parse(m[0]) } catch { return [] }
 }
 
+// SM-2 Algorithm — quality scale 0-5 (standard):
+// 0=Esqueci, 3=Difícil(correto c/ dificuldade), 4=Bom(correto c/ hesitação), 5=Fácil(perfeito)
 export function sm2(state, quality) {
   let { interval_days: i = 1, ease_factor: ef = 2.5, repetitions: r = 0 } = state || {}
-  if (quality < 3) { i = 1; r = 0 }
-  else {
+  if (quality < 3) {
+    // Errou — reinicia sequência, revisão amanhã
+    i = 1; r = 0
+  } else {
+    // Acertou — aumenta intervalo progressivamente
     if (r === 0) i = 1
     else if (r === 1) i = 6
     else i = Math.round(i * ef)
     r++
+    // Ajusta fator de facilidade (EF) baseado na qualidade
     ef = Math.max(1.3, ef + 0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02))
   }
   const next = new Date()
