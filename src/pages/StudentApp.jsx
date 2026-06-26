@@ -141,18 +141,13 @@ function SHome({ profile, due, content, setPage }) {
 }
 
 function SReview({ due, reviews, onReview, toast, profile }) {
+  // Inicializa a fila UMA VEZ ao montar o componente — não reseta quando due muda
   const [queue, setQueue] = useState(() => [...due.slice(0, 20)])
   const [idx, setIdx] = useState(0)
   const [flipped, setFlipped] = useState(false)
   const [done, setDone] = useState(false)
   const [feedback, setFeedback] = useState(null) // { correct, interval, label }
   const [stats, setStats] = useState({ reviewed: 0, correct: 0, xp: 0 })
-
-  useEffect(() => {
-    setQueue([...due.slice(0, 20)])
-    setIdx(0); setFlipped(false); setDone(false); setFeedback(null)
-    setStats({ reviewed: 0, correct: 0, xp: 0 })
-  }, [due.length])
 
   const intervalLabel = days => {
     if (days <= 1) return 'amanhã'
