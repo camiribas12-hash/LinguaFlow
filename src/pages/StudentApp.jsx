@@ -273,6 +273,18 @@ function SReview({ due, reviews, onReview, toast, profile }) {
   </div>
 }
 
+// Web Speech API helper
+const speak = (text, onEnd) => {
+  if (!('speechSynthesis' in window)) return
+  window.speechSynthesis.cancel()
+  const u = new SpeechSynthesisUtterance(text)
+  u.lang = 'en-US'
+  u.rate = 0.85
+  u.pitch = 1.0
+  if (onEnd) u.onend = onEnd
+  window.speechSynthesis.speak(u)
+}
+
 function SExercises({ user, content, toast }) {
   const [exs, setExs] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -282,6 +294,8 @@ function SExercises({ user, content, toast }) {
   const [submitted, setSubmitted] = useState(false)
   const [score, setScore] = useState({ ok: 0, total: 0 })
   const [done, setDone] = useState(false)
+  const [playing, setPlaying] = useState(false)
+  const [listened, setListened] = useState(false)
 
   const generate = async () => {
     if (!content.length) { toast({ type: 'error', title: 'Sem conteúdo ainda', msg: 'Aguarde sua professora processar uma aula.' }); return }
@@ -289,101 +303,211 @@ function SExercises({ user, content, toast }) {
     try {
       const generated = await generateExercises(content)
       if (!generated.length) throw new Error('Nenhum exercício gerado')
-      setExs(generated); setIdx(0); setSel(null); setAns(''); setSubmitted(false); setScore({ ok: 0, total: 0 }); setDone(false)
+      setExs(generated); setIdx(0); setSel(null); setAns(''); setSubmitted(false)
+      setScore({ ok: 0, total: 0 }); setDone(false); setListened(false)
       toast({ type: 'success', title: `✅ ${generated.length} exercícios gerados!` })
     } catch (e) { toast({ type: 'error', title: 'Erro', msg: e.message }) }
     setLoading(false)
   }
 
-  if (!exs || exs.length === 0) return <div style={{ padding: 20, textAlign: 'center' }}>
-    <div style={{ fontSize: 56, marginBottom: 12 }}>✏️</div>
-    <div style={{ fontSize: 18, fontWeight: 700, color: C.green, marginBottom: 6 }}>Exercícios Interativos</div>
-    <div style={{ fontSize: 13, color: C.muted, marginBottom: 20, lineHeight: 1.6 }}>A IA cria exercícios personalizados<br />com o vocabulário das suas aulas</div>
-    <button onClick={generate} disabled={loading || !content.length} style={{ ...bp(), opacity: loading || !content.length ? .5 : 1, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-      {loading ? <Spin /> : '🧠'}{loading ? 'Gerando...' : 'Gerar Exercícios com IA'}
-    </button>
-    {!content.length && <p style={{ fontSize: 12, color: C.muted, marginTop: 12 }}>Aguarde sua professora processar uma aula.</p>}
-  </div>
+  if (!exs || exs.length === 0) return (
+    <div style={{ padding: 24, textAlign: 'center' }}>
+      <div style={{ fontSize: 56, marginBottom: 12 }}>✏️</div>
+      <div style={{ fontSize: 18, fontWeight: 700, color: C.green, marginBottom: 6 }}>Exercícios Interativos</div>
+      <div style={{ fontSize: 13, color: C.muted, marginBottom: 8, lineHeight: 1.6 }}>
+        A IA cria exercícios personalizados com o vocabulário das suas aulas
+      </div>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
+        {['📝 Múltipla escolha','✍️ Preencha o espaço','🔊 Listening','🔍 Correção de erros'].map(t =>
+          <span key={t} style={{ fontSize: 11, color: C.muted, background: C.bor, padding: '3px 10px', borderRadius: 20 }}>{t}</span>
+        )}
+      </div>
+      <button onClick={generate} disabled={loading || !content.length}
+        style={{ ...bp(), opacity: loading || !content.length ? .5 : 1, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+        {loading ? <Spin /> : '🧠'}{loading ? 'Gerando...' : 'Gerar Exercícios com IA'}
+      </button>
+      {!content.length && <p style={{ fontSize: 12, color: C.muted, marginTop: 12 }}>Aguarde sua professora processar uma aula.</p>}
+    </div>
+  )
 
   if (done) {
     const pct = Math.round(score.ok / score.total * 100)
-    return <div style={{ padding: 20, textAlign: 'center' }}>
-      <div style={{ fontSize: 64, marginBottom: 12 }}>{pct >= 80 ? '🏆' : pct >= 60 ? '🌟' : '📚'}</div>
-      <div style={{ fontSize: 22, fontWeight: 900, color: C.green, marginBottom: 8 }}>Exercícios concluídos!</div>
-      <div style={{ ...crd, display: 'inline-block', padding: '12px 24px', marginBottom: 20 }}>
-        <span style={{ fontSize: 28, fontWeight: 900, color: C.orange }}>{score.ok}/{score.total}</span><span style={{ fontSize: 14, color: C.muted, marginLeft: 8 }}>{pct}% acertos</span>
+    return (
+      <div style={{ padding: 24, textAlign: 'center' }}>
+        <div style={{ fontSize: 64, marginBottom: 12 }}>{pct >= 80 ? '🏆' : pct >= 60 ? '🌟' : '📚'}</div>
+        <div style={{ fontSize: 22, fontWeight: 900, color: C.green, marginBottom: 12 }}>Exercícios concluídos!</div>
+        <div style={{ ...crd, display: 'inline-block', padding: '14px 28px', marginBottom: 20 }}>
+          <div style={{ fontSize: 32, fontWeight: 900, color: C.orange }}>{score.ok}/{score.total}</div>
+          <div style={{ fontSize: 14, color: C.muted }}>{pct}% de acerto</div>
+        </div>
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+          <button onClick={() => { setDone(false); setIdx(0); setSel(null); setAns(''); setSubmitted(false); setScore({ ok: 0, total: 0 }); setListened(false) }}
+            style={{ background: 'transparent', color: C.green, border: `1.5px solid ${C.bor2}`, borderRadius: 10, padding: '10px 18px', cursor: 'pointer', fontSize: 14 }}>
+            Tentar Novamente
+          </button>
+          <button onClick={generate} disabled={loading} style={bp()}>Novos Exercícios</button>
+        </div>
       </div>
-      <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
-        <button onClick={() => { setDone(false); setIdx(0); setSel(null); setAns(''); setSubmitted(false); setScore({ ok: 0, total: 0 }) }} style={{ background: 'transparent', color: C.green, border: `1.5px solid ${C.bor2}`, borderRadius: 10, padding: '10px 18px', cursor: 'pointer', fontSize: 14 }}>Tentar Novamente</button>
-        <button onClick={generate} disabled={loading} style={bp()}>Novos Exercícios</button>
-      </div>
-    </div>
+    )
   }
 
-  const ex = exs[idx]; if (!ex) return null
-  const typeColor = { multiple_choice: C.green, error_correction: C.err, fill_blank: C.orange, true_false: C.sage }
-  const typeName = { multiple_choice: 'Múltipla Escolha', error_correction: 'Correção de Erros', fill_blank: 'Preencha o Espaço', true_false: 'Verdadeiro ou Falso' }
+  const ex = exs[idx]
+  if (!ex) return null
+
+  const typeColor = { multiple_choice: C.green, error_correction: C.err, fill_blank: C.orange, true_false: C.sage, listening: '#7c3aed' }
+  const typeName  = { multiple_choice: '📝 Múltipla Escolha', error_correction: '🔍 Correção de Erros', fill_blank: '✍️ Complete a Frase', true_false: '✅ Verdadeiro ou Falso', listening: '🔊 Listening' }
   const col = typeColor[ex.type] || C.green
+  const isListening = ex.type === 'listening'
+
+  const playAudio = () => {
+    setPlaying(true)
+    speak(ex.audio_text || ex.question, () => { setPlaying(false); setListened(true) })
+  }
 
   const check = () => {
     let ok = false
-    if (ex.type === 'multiple_choice') ok = sel === ex.correct
+    if (ex.type === 'multiple_choice' || ex.type === 'listening') ok = sel === ex.correct
     else if (ex.type === 'true_false') ok = sel === (ex.correct ? 'true' : 'false')
     else if (ex.type === 'fill_blank') ok = ans.toLowerCase().trim() === (ex.answer || '').toLowerCase().trim()
     else if (ex.type === 'error_correction') {
       const corr = (ex.correct || '').toLowerCase().replace(/[.,!?]/g, '').trim()
       ok = ans.toLowerCase().replace(/[.,!?]/g, '').trim().includes(corr) || corr.includes(ans.toLowerCase().replace(/[.,!?]/g, '').trim())
     }
-    setSubmitted(true); setScore(p => ({ ok: ok ? p.ok + 1 : p.ok, total: p.total + 1 }))
+    setSubmitted(true)
+    setScore(p => ({ ok: ok ? p.ok + 1 : p.ok, total: p.total + 1 }))
     if (ok) toast({ type: 'success', title: '✅ Correto! +10 XP' })
     else toast({ type: 'error', title: '❌ Incorreto', msg: `Resposta: ${ex.answer || ex.correct}` })
   }
 
   const next = () => {
+    window.speechSynthesis?.cancel()
     if (idx + 1 >= exs.length) setDone(true)
-    else { setIdx(i => i + 1); setSel(null); setAns(''); setSubmitted(false) }
+    else { setIdx(i => i + 1); setSel(null); setAns(''); setSubmitted(false); setListened(false) }
   }
 
-  const canSubmit = (ex.type === 'multiple_choice' || ex.type === 'true_false') ? sel !== null : ans.trim().length > 0
+  const canSubmit = isListening
+    ? listened && sel !== null
+    : (ex.type === 'multiple_choice' || ex.type === 'true_false') ? sel !== null : ans.trim().length > 0
 
-  return <div style={{ padding: 16 }}>
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: C.muted, marginBottom: 6 }}><span>Exercício {idx + 1}/{exs.length}</span><span style={{ color: C.orange, fontWeight: 600 }}>✅ {score.ok} correto(s)</span></div>
-      <div style={{ height: 5, background: C.bor, borderRadius: 4 }}><div style={{ height: '100%', width: `${(idx / exs.length) * 100}%`, background: C.orange, borderRadius: 4, transition: 'width .3s' }} /></div>
-    </div>
-    <div style={{ ...crd, marginTop: 12, marginBottom: 12 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-        <span style={{ fontSize: 11, background: col + '20', color: col, padding: '3px 10px', borderRadius: 20, fontWeight: 700 }}>{typeName[ex.type]}</span>
+  return (
+    <div style={{ padding: 16 }}>
+      <div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: C.muted, marginBottom: 6 }}>
+          <span>Exercício {idx + 1}/{exs.length}</span>
+          <span style={{ color: C.orange, fontWeight: 600 }}>✅ {score.ok} correto(s)</span>
+        </div>
+        <div style={{ height: 5, background: C.bor, borderRadius: 4 }}>
+          <div style={{ height: '100%', width: `${(idx / exs.length) * 100}%`, background: C.orange, borderRadius: 4, transition: 'width .3s' }} />
+        </div>
       </div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: C.tx, lineHeight: 1.6 }}>{ex.question || ex.sentence || ex.statement}</div>
-      {ex.hint && <div style={{ fontSize: 12, color: C.sage, marginTop: 6, fontStyle: 'italic' }}>💡 Dica: {ex.hint}</div>}
+
+      <div style={{ ...crd, marginTop: 12, marginBottom: 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <span style={{ fontSize: 11, background: col + '20', color: col, padding: '3px 10px', borderRadius: 20, fontWeight: 700 }}>{typeName[ex.type]}</span>
+        </div>
+
+        {/* Listening: botão de áudio em destaque */}
+        {isListening && (
+          <div style={{ textAlign: 'center', marginBottom: 16 }}>
+            <button onClick={playAudio} disabled={playing}
+              style={{ width: 80, height: 80, borderRadius: 40, background: listened ? C.sage + '20' : col + '15', border: `2.5px solid ${listened ? C.sage : col}`, fontSize: 32, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', transition: 'all .2s' }}>
+              {playing ? '⏸' : '🔊'}
+            </button>
+            <div style={{ fontSize: 12, color: listened ? C.sage : C.muted, marginTop: 8, fontWeight: listened ? 700 : 400 }}>
+              {playing ? 'Ouvindo...' : listened ? '✅ Ouvi! Agora escolha a opção' : 'Clique para ouvir a palavra'}
+            </div>
+            {!listened && <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>Ouça antes de responder</div>}
+          </div>
+        )}
+
+        {/* Questão / sentença */}
+        {!isListening && (
+          <div style={{ fontSize: 15, fontWeight: 600, color: C.tx, lineHeight: 1.6 }}>
+            {ex.question || ex.sentence || ex.statement}
+          </div>
+        )}
+        {isListening && listened && (
+          <div style={{ fontSize: 14, fontWeight: 600, color: C.tx, textAlign: 'center' }}>
+            {ex.question || 'Qual palavra você ouviu?'}
+          </div>
+        )}
+
+        {ex.hint && !isListening && <div style={{ fontSize: 12, color: C.sage, marginTop: 6, fontStyle: 'italic' }}>💡 Dica: {ex.hint}</div>}
+      </div>
+
+      {/* Opções — múltipla escolha e listening */}
+      {(ex.type === 'multiple_choice' || isListening) && (!isListening || listened) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+          {(ex.options || []).map((opt, i) => {
+            let bg = 'transparent', bdr = C.bor, tc = C.tx
+            if (submitted) {
+              if (i === ex.correct) { bg = C.sage + '25'; bdr = C.sage; tc = C.green }
+              else if (i === sel && i !== ex.correct) { bg = C.err + '15'; bdr = C.err; tc = C.err }
+            } else if (sel === i) { bg = C.orange + '18'; bdr = C.orange; tc = C.orange }
+            return (
+              <button key={i} onClick={() => !submitted && setSel(i)}
+                style={{ padding: '13px 16px', borderRadius: 10, border: `1.5px solid ${bdr}`, background: bg, color: tc, textAlign: 'left', fontSize: 14, cursor: submitted ? 'default' : 'pointer', fontWeight: sel === i ? 600 : 400, display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: bdr, minWidth: 20 }}>{['A','B','C','D'][i]}</span>
+                {opt}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Verdadeiro/Falso */}
+      {ex.type === 'true_false' && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
+          {['Verdadeiro', 'Falso'].map((label, i) => {
+            const val = i === 0 ? 'true' : 'false'
+            const isCorr = (i === 0) === ex.correct
+            let bg = 'transparent', bdr = C.bor, tc = C.tx
+            if (submitted) {
+              if (isCorr) { bg = C.sage + '25'; bdr = C.sage; tc = C.green }
+              else if (sel === val && !isCorr) { bg = C.err + '15'; bdr = C.err; tc = C.err }
+            } else if (sel === val) { bg = C.orange + '18'; bdr = C.orange; tc = C.orange }
+            return (
+              <button key={i} onClick={() => !submitted && setSel(val)}
+                style={{ padding: '14px', borderRadius: 10, border: `1.5px solid ${bdr}`, background: bg, color: tc, fontSize: 14, fontWeight: 700, cursor: submitted ? 'default' : 'pointer' }}>
+                {i === 0 ? '✅ ' : '❌ '}{label}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Fill blank / Error correction */}
+      {(ex.type === 'fill_blank' || ex.type === 'error_correction') && (
+        <div style={{ marginBottom: 12 }}>
+          <input value={ans} onChange={e => !submitted && setAns(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && !submitted && canSubmit && check()}
+            disabled={submitted}
+            placeholder={ex.type === 'fill_blank' ? 'Digite a palavra ou expressão...' : 'Escreva a frase corrigida...'}
+            style={inp} />
+        </div>
+      )}
+
+      {/* Explicação após responder */}
+      {submitted && (
+        <div style={{ padding: 12, background: C.bg, borderRadius: 10, border: `1px solid ${C.bor}`, marginBottom: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.green, marginBottom: 4 }}>💡 Explicação:</div>
+          <div style={{ fontSize: 13, color: C.tx, lineHeight: 1.5 }}>{ex.explanation}</div>
+          {isListening && submitted && (
+            <button onClick={() => speak(ex.audio_text)} style={{ marginTop: 8, fontSize: 12, color: C.sage, background: 'none', border: 'none', cursor: 'pointer', fontWeight: 700 }}>
+              🔊 Ouvir novamente: "{ex.audio_text}"
+            </button>
+          )}
+        </div>
+      )}
+
+      <div>
+        {!submitted
+          ? <button onClick={check} disabled={!canSubmit} style={{ ...bp(), width: '100%', opacity: !canSubmit ? .5 : 1 }}>Confirmar</button>
+          : <button onClick={next} style={{ ...bp(), width: '100%' }}>Próximo →</button>
+        }
+      </div>
     </div>
-    {ex.type === 'multiple_choice' && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
-      {(ex.options || []).map((opt, i) => {
-        let bg = 'transparent', bdr = C.bor, tc = C.tx
-        if (submitted) { if (i === ex.correct) { bg = C.sage + '25'; bdr = C.sage; tc = C.green } else if (i === sel && i !== ex.correct) { bg = C.err + '15'; bdr = C.err; tc = C.err } }
-        else if (sel === i) { bg = C.orange + '18'; bdr = C.orange; tc = C.orange }
-        return <button key={i} onClick={() => !submitted && setSel(i)} style={{ padding: '13px 16px', borderRadius: 10, border: `1.5px solid ${bdr}`, background: bg, color: tc, textAlign: 'left', fontSize: 14, cursor: submitted ? 'default' : 'pointer', fontWeight: sel === i ? 600 : 400 }}>{opt}</button>
-      })}
-    </div>}
-    {ex.type === 'true_false' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
-      {['Verdadeiro', 'Falso'].map((label, i) => {
-        const val = i === 0 ? 'true' : 'false'; const isCorr = (i === 0) === ex.correct
-        let bg = 'transparent', bdr = C.bor, tc = C.tx
-        if (submitted) { if (isCorr) { bg = C.sage + '25'; bdr = C.sage; tc = C.green } else if (sel === val && !isCorr) { bg = C.err + '15'; bdr = C.err; tc = C.err } }
-        else if (sel === val) { bg = C.orange + '18'; bdr = C.orange; tc = C.orange }
-        return <button key={i} onClick={() => !submitted && setSel(val)} style={{ padding: '14px', borderRadius: 10, border: `1.5px solid ${bdr}`, background: bg, color: tc, fontSize: 14, fontWeight: 700, cursor: submitted ? 'default' : 'pointer' }}>{label}</button>
-      })}
-    </div>}
-    {(ex.type === 'fill_blank' || ex.type === 'error_correction') && <div style={{ marginBottom: 12 }}>
-      <input value={ans} onChange={e => !submitted && setAns(e.target.value)} onKeyDown={e => e.key === 'Enter' && !submitted && canSubmit && check()} disabled={submitted} placeholder={ex.type === 'fill_blank' ? 'Digite a palavra ou expressão...' : 'Escreva a frase corrigida...'} style={inp} />
-    </div>}
-    {submitted && <div style={{ padding: 12, background: C.bg, borderRadius: 10, border: `1px solid ${C.bor}`, marginBottom: 12 }}>
-      <div style={{ fontSize: 12, fontWeight: 700, color: C.green, marginBottom: 4 }}>💡 Explicação:</div>
-      <div style={{ fontSize: 13, color: C.tx, lineHeight: 1.5 }}>{ex.explanation}</div>
-    </div>}
-    <div>{!submitted ? <button onClick={check} disabled={!canSubmit} style={{ ...bp(), width: '100%', opacity: !canSubmit ? .5 : 1 }}>Confirmar</button> : <button onClick={next} style={{ ...bp(), width: '100%' }}>Próximo →</button>}</div>
-  </div>
+  )
 }
 
 function SProgress({ profile, flashcards, reviews, content }) {
