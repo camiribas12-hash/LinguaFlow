@@ -30,7 +30,7 @@ Each exercise block separated by blank line. Use pipe | as field separator.
 Keep ALL field values on a SINGLE LINE with no line breaks.
 
 [MULTIPLE_CHOICE]
-question: What does X mean? | options: a|b|c|d | correct: 0 | explanation: X means...
+question: What does X mean? | options: a;b;c;d | correct: 0 | explanation: X means...
 
 [ERROR_CORRECTION]
 sentence: Wrong sentence | correct: Fixed sentence | explanation: Grammar rule
@@ -42,13 +42,15 @@ sentence: She decided to ___ the meeting | answer: attend | hint: to be present 
 statement: X means Y | correct: false | explanation: reason
 
 [LISTENING]
-audio: singleword | question: What word did you hear? | options: word1|word2|word3|word4 | correct: 0 | explanation: meaning
+audio: singleword | question: What word did you hear? | options: word1;word2;word3;word4 | correct: 0 | explanation: meaning
 
 Important rules:
 - Use ONLY words and grammar from the provided content
 - For LISTENING: audio must be one word from content, options are 4 similar English words
 - correct field: number 0-3 for multiple_choice and listening, true or false for true_false
-- Never put quotes or pipes inside field values`
+- For options field: use SEMICOLON ; to separate options (NOT pipe)
+- Never put quotes or pipes inside field values
+- Always provide exactly 4 options for multiple_choice and listening`
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -94,7 +96,7 @@ function parseExercises(text) {
         const f = parseFields(line)
         const type = sectionKey.toLowerCase()
         if ((type === 'multiple_choice' || type === 'listening') && (f.question || f.audio)) {
-          const opts = (f.options || '').split('|').map(s => s.trim()).filter(Boolean)
+          const opts = (f.options || '').split(';').map(s => s.trim()).filter(Boolean)
           if (!opts.length) continue
           exercises.push({ type, question: f.question || 'What word did you hear?', audio_text: f.audio || '', options: opts, correct: parseInt(f.correct) || 0, explanation: f.explanation || '' })
         } else if (type === 'error_correction' && f.sentence) {
