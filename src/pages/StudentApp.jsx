@@ -51,9 +51,12 @@ export default function StudentApp({ user, profile: initProfile, onLogout }) {
 
   useEffect(() => { loadAll() }, [loadAll])
 
-  const saveReview = useCallback(async (cardId, quality) => {
+  const saveReview = useCallback(async (cardId, btnQuality) => {
+    // Map botões (0-3) para escala SM-2 (0-5):
+    // Esqueci→0, Difícil→3, Bom→4, Fácil→5
+    const sm2Quality = [0, 3, 4, 5][btnQuality] ?? 0
     const current = reviews[cardId]
-    const next = sm2(current, quality)
+    const next = sm2(current, sm2Quality)
     const payload = { flashcard_id: cardId, student_id: user.id, ...next }
     if (current?.id) {
       await supabase.from('reviews').update(next).eq('id', current.id)
@@ -62,9 +65,10 @@ export default function StudentApp({ user, profile: initProfile, onLogout }) {
       if (data) payload.id = data.id
     }
     setReviews(prev => ({ ...prev, [cardId]: { ...payload } }))
-    const newXp = (profile.xp || 0) + 10
+    const newXp = (profile.xp || 0) + (btnQuality >= 2 ? 15 : btnQuality === 1 ? 8 : 3)
     await supabase.from('profiles').update({ xp: newXp }).eq('id', user.id)
     setProfile(p => ({ ...p, xp: newXp }))
+    return next // retorna estado para mostrar feedback
   }, [reviews, user.id, profile.xp])
 
   const due = flashcards.filter(f => !(reviews[f.id]?.next_review > today()))
@@ -137,48 +141,140 @@ function SHome({ profile, due, content, setPage }) {
 }
 
 function SReview({ due, reviews, onReview, toast, profile }) {
-  const session = due.slice(0, 15)
+  const [queue, setQueue] = useState(() => [...due.slice(0, 20)])
   const [idx, setIdx] = useState(0)
   const [flipped, setFlipped] = useState(false)
   const [done, setDone] = useState(false)
-  const [count, setCount] = useState(0)
+  const [feedback, setFeedback] = useState(null) // { correct, interval, label }
+  const [stats, setStats] = useState({ reviewed: 0, correct: 0, xp: 0 })
 
-  useEffect(() => { setIdx(0); setFlipped(false); setDone(false); setCount(0) }, [due.length])
+  useEffect(() => {
+    setQueue([...due.slice(0, 20)])
+    setIdx(0); setFlipped(false); setDone(false); setFeedback(null)
+    setStats({ reviewed: 0, correct: 0, xp: 0 })
+  }, [due.length])
 
-  if (session.length === 0 || done) return <div style={{ padding: 20, textAlign: 'center' }}>
-    <div style={{ fontSize: 64, marginBottom: 16 }}>{done ? '🎉' : '🌱'}</div>
-    <div style={{ fontSize: 22, fontWeight: 900, color: C.green, marginBottom: 8 }}>{done ? 'Sessão concluída!' : 'Nenhum card pendente!'}</div>
-    <div style={{ fontSize: 14, color: C.muted }}>{done ? `+${count * 10} XP · ${count} card${count !== 1 ? 's' : ''} revisado${count !== 1 ? 's' : ''}` : 'Volte amanhã para continuar.'}</div>
-  </div>
+  const intervalLabel = days => {
+    if (days <= 1) return 'amanhã'
+    if (days < 7) return `em ${days} dias`
+    if (days < 30) return `em ${Math.round(days / 7)} semana(s)`
+    return `em ${Math.round(days / 30)} mês(es)`
+  }
 
-  const card = session[idx]
+  if (queue.length === 0 || done) return (
+    <div style={{ padding: 24, textAlign: 'center' }}>
+      <div style={{ fontSize: 72, marginBottom: 12 }}>{done ? '🎉' : '🌱'}</div>
+      <div style={{ fontSize: 22, fontWeight: 900, color: C.green, marginBottom: 8 }}>
+        {done ? 'Sessão concluída!' : 'Nenhum card pendente!'}
+      </div>
+      {done ? (
+        <div style={{ ...crd, display: 'inline-block', padding: '16px 28px', marginTop: 8 }}>
+          <div style={{ fontSize: 28, fontWeight: 900, color: C.orange }}>+{stats.xp} XP</div>
+          <div style={{ fontSize: 13, color: C.muted, marginTop: 4 }}>
+            ✅ {stats.correct} de {stats.reviewed} corretos
+          </div>
+        </div>
+      ) : (
+        <div style={{ fontSize: 14, color: C.muted }}>Volte amanhã para continuar sua revisão.</div>
+      )}
+    </div>
+  )
+
+  const card = queue[idx]
+  if (!card) { setDone(true); return null }
+
   const tcol = { vocabulary: C.green, idiom: C.orange, phrasal_verb: C.sage, grammar: C.green, correction: C.err }
   const tlbl = { vocabulary: 'VOCABULARY', idiom: 'IDIOM', phrasal_verb: 'PHRASAL VERB', grammar: 'GRAMMAR', correction: 'CORRECTION' }
   const col = tcol[card.type] || C.green
 
-  const answer = async q => {
-    await onReview(card.id, q)
-    const nc = count + 1
-    setCount(nc)
-    if (idx + 1 >= session.length) setDone(true)
-    else { setIdx(i => i + 1); setFlipped(false) }
+  const answer = async (btnQuality) => {
+    const isCorrect = btnQuality > 0
+    const nextState = await onReview(card.id, btnQuality)
+    const xpGain = btnQuality >= 2 ? 15 : btnQuality === 1 ? 8 : 3
+
+    // Monta feedback visual
+    setFeedback({
+      correct: isCorrect,
+      label: isCorrect ? `Próxima revisão: ${intervalLabel(nextState.interval_days)}` : 'Voltando para a fila… 🔄',
+      color: isCorrect ? C.sage : C.err,
+      xp: xpGain
+    })
+
+    setStats(p => ({ reviewed: p.reviewed + 1, correct: isCorrect ? p.correct + 1 : p.correct, xp: p.xp + xpGain }))
+
+    setTimeout(() => {
+      setFeedback(null)
+      setFlipped(false)
+
+      // Se esqueceu E ainda não repetiu nesta sessão: coloca de volta na fila (3 posições à frente)
+      let newQueue = [...queue]
+      if (!isCorrect && !card._retried) {
+        const insertAt = Math.min(idx + 4, newQueue.length)
+        newQueue.splice(insertAt, 0, { ...card, _retried: true })
+      }
+
+      if (idx + 1 >= newQueue.length) {
+        setDone(true)
+      } else {
+        setQueue(newQueue)
+        setIdx(i => i + 1)
+      }
+    }, 1400)
   }
+
+  const total = queue.filter(c => !c._retried).length
 
   return <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: C.muted, marginBottom: 6 }}><span>Card {idx + 1} / {session.length}</span><span>✅ {count} revisados</span></div>
-      <div style={{ height: 5, background: C.bor, borderRadius: 4 }}><div style={{ height: '100%', width: `${(idx / session.length) * 100}%`, background: C.orange, borderRadius: 4, transition: 'width .3s' }} /></div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: C.muted, marginBottom: 6 }}>
+        <span>Card {Math.min(idx + 1, total)} / {total}</span>
+        <span>✅ {stats.correct} · ⚡ +{stats.xp} XP</span>
+      </div>
+      <div style={{ height: 5, background: C.bor, borderRadius: 4 }}>
+        <div style={{ height: '100%', width: `${(Math.min(idx, total) / total) * 100}%`, background: C.orange, borderRadius: 4, transition: 'width .3s' }} />
+      </div>
+      {card._retried && <div style={{ fontSize: 10, color: C.orange, marginTop: 4, textAlign: 'right' }}>🔄 Revisando novamente</div>}
     </div>
-    <div onClick={() => setFlipped(!flipped)} style={{ background: C.green, borderRadius: 18, padding: 28, textAlign: 'center', cursor: 'pointer', minHeight: 200, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+
+    {/* Card */}
+    <div onClick={() => !feedback && setFlipped(!flipped)}
+      style={{ background: C.green, borderRadius: 18, padding: 28, textAlign: 'center', cursor: feedback ? 'default' : 'pointer', minHeight: 200, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, position: 'relative', overflow: 'hidden' }}>
+
+      {/* Feedback overlay */}
+      {feedback && (
+        <div style={{ position: 'absolute', inset: 0, background: feedback.color + 'ee', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: 18, gap: 10, animation: 'fadeIn .2s' }}>
+          <div style={{ fontSize: 48 }}>{feedback.correct ? '✅' : '😅'}</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: '#fff' }}>{feedback.label}</div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,.8)' }}>+{feedback.xp} XP</div>
+        </div>
+      )}
+
       <div style={{ fontSize: 10, fontWeight: 700, color: C.sage, letterSpacing: 2 }}>{flipped ? 'RESPOSTA' : tlbl[card.type]}</div>
-      {!flipped ? <div style={{ fontSize: 24, fontWeight: 800, color: '#f3e6d2', lineHeight: 1.3 }}>{card.front}</div> : <div style={{ fontSize: 13, color: 'rgba(243,230,210,.9)', lineHeight: 1.9, whiteSpace: 'pre-wrap', textAlign: 'left', width: '100%' }}>{card.back}</div>}
-      {!flipped && <div style={{ fontSize: 12, color: 'rgba(243,230,210,.5)' }}>👆 Toque para revelar</div>}
+      {!flipped
+        ? <div style={{ fontSize: 24, fontWeight: 800, color: '#f3e6d2', lineHeight: 1.3 }}>{card.front}</div>
+        : <div style={{ fontSize: 13, color: 'rgba(243,230,210,.9)', lineHeight: 1.9, whiteSpace: 'pre-wrap', textAlign: 'left', width: '100%' }}>{card.back}</div>
+      }
+      {!flipped && !feedback && <div style={{ fontSize: 12, color: 'rgba(243,230,210,.5)' }}>👆 Toque para revelar</div>}
     </div>
-    {flipped && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8 }}>
-      {[['Esqueci', C.err, 0], ['Difícil', C.orange, 1], ['Bom', C.sage, 2], ['Fácil', C.green, 3]].map(([l, co, q]) => (
-        <button key={l} onClick={() => answer(q)} style={{ background: co + '20', border: `1.5px solid ${co}44`, color: co, borderRadius: 10, padding: '12px 4px', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>{l}</button>
-      ))}
-    </div>}
+
+    {/* Botões de resposta — só aparecem quando o card está virado e sem feedback */}
+    {flipped && !feedback && (
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8 }}>
+        {[
+          ['😵 Esqueci', C.err, 0, 'Volta hoje'],
+          ['😅 Difícil', C.orange, 1, '+3 dias'],
+          ['🙂 Bom', C.sage, 2, '+6 dias'],
+          ['😄 Fácil', C.green, 3, 'Longo prazo'],
+        ].map(([l, co, q, hint]) => (
+          <button key={l} onClick={() => answer(q)}
+            style={{ background: co + '18', border: `1.5px solid ${co}55`, color: co, borderRadius: 12, padding: '10px 4px', fontSize: 11, fontWeight: 700, cursor: 'pointer', lineHeight: 1.4 }}>
+            <div>{l.split(' ')[0]}</div>
+            <div style={{ fontSize: 10, fontWeight: 600 }}>{l.split(' ').slice(1).join(' ')}</div>
+            <div style={{ fontSize: 9, color: co + 'aa', marginTop: 2 }}>{hint}</div>
+          </button>
+        ))}
+      </div>
+    )}
   </div>
 }
 
