@@ -157,6 +157,51 @@ function SReview({ due, reviews, onReview, toast, profile }) {
   const tlbl = { vocabulary: 'VOCABULARY', idiom: 'IDIOM', phrasal_verb: 'PHRASAL VERB', grammar: 'GRAMMAR', correction: 'CORRECTION' }
   const col = tcol[card.type] || C.green
 
+  const speakCard = (c, isBack) => {
+    if (!('speechSynthesis' in window)) return
+    window.speechSynthesis.cancel()
+    let text = ''
+    if (isBack) {
+      const lines = (c.back || '').split('\n').filter(Boolean)
+      const exLine = lines.find(l => l.includes('💬'))
+      const defLine = lines.find(l => l.includes('📖'))
+      text = (exLine || defLine || '').replace(/[💬📖🇧🇷✅]\s*/g, '').replace(/^["""]|["""]$/g, '').trim()
+      if (!text) text = c.front
+    } else {
+      text = (c.front || '').replace(/^Corrija:\s*["""]?/i, '').replace(/["""]$/, '').trim()
+    }
+    if (!text) return
+    const u = new SpeechSynthesisUtterance(text)
+    u.lang = 'en-US'
+    u.rate = 0.85
+    u.pitch = 1.0
+    window.speechSynthesis.speak(u)
+  }
+
+  // Fala o card em inglês usando Web Speech API
+  const speakCard = (c, isBack) => {
+    if (!('speechSynthesis' in window)) return
+    window.speechSynthesis.cancel()
+    let textEN = ''
+    if (isBack) {
+      // No verso: lê o exemplo em inglês (linha com 💬) ou a definição
+      const lines = (c.back || '').split('\n').filter(Boolean)
+      const exLine = lines.find(l => l.includes('💬'))
+      const defLine = lines.find(l => l.includes('📖'))
+      textEN = (exLine || defLine || '').replace(/[💬📖🇧🇷✅]\s*/g, '').replace(/^[""]|[""]$/g, '').trim()
+      if (!textEN) textEN = c.front // fallback
+    } else {
+      // Na frente: lê a palavra/expressão (remove prefixo "Corrija: ")
+      textEN = (c.front || '').replace(/^Corrija:\s*[""]?/i, '').replace(/[""]$/, '').trim()
+    }
+    if (!textEN) return
+    const u = new SpeechSynthesisUtterance(textEN)
+    u.lang = 'en-US'
+    u.rate = 0.85
+    u.pitch = 1.0
+    window.speechSynthesis.speak(u)
+  }
+
   const answer = async q => {
     await onReview(card.id, q)
     const nc = count + 1
@@ -172,8 +217,23 @@ function SReview({ due, reviews, onReview, toast, profile }) {
     </div>
     <div onClick={() => setFlipped(!flipped)} style={{ background: C.green, borderRadius: 18, padding: 28, textAlign: 'center', cursor: 'pointer', minHeight: 200, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
       <div style={{ fontSize: 10, fontWeight: 700, color: C.sage, letterSpacing: 2 }}>{flipped ? 'RESPOSTA' : tlbl[card.type]}</div>
-      {!flipped ? <div style={{ fontSize: 24, fontWeight: 800, color: '#f3e6d2', lineHeight: 1.3 }}>{card.front}</div> : <div style={{ fontSize: 13, color: 'rgba(243,230,210,.9)', lineHeight: 1.9, whiteSpace: 'pre-wrap', textAlign: 'left', width: '100%' }}>{card.back}</div>}
-      {!flipped && <div style={{ fontSize: 12, color: 'rgba(243,230,210,.5)' }}>👆 Toque para revelar</div>}
+      {!flipped
+        ? <>
+            <div style={{ fontSize: 24, fontWeight: 800, color: '#f3e6d2', lineHeight: 1.3 }}>{card.front}</div>
+            <button onClick={e => { e.stopPropagation(); speakCard(card, false) }}
+              style={{ background: 'rgba(255,255,255,.15)', border: '1.5px solid rgba(255,255,255,.3)', borderRadius: 20, padding: '6px 14px', color: '#f3e6d2', fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+              🔊 Ouvir
+            </button>
+            <div style={{ fontSize: 12, color: 'rgba(243,230,210,.5)' }}>👆 Toque para revelar</div>
+          </>
+        : <>
+            <div style={{ fontSize: 13, color: 'rgba(243,230,210,.9)', lineHeight: 1.9, whiteSpace: 'pre-wrap', textAlign: 'left', width: '100%' }}>{card.back}</div>
+            <button onClick={e => { e.stopPropagation(); speakCard(card, true) }}
+              style={{ background: 'rgba(255,255,255,.15)', border: '1.5px solid rgba(255,255,255,.3)', borderRadius: 20, padding: '6px 14px', color: '#f3e6d2', fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, alignSelf: 'center' }}>
+              🔊 Ouvir exemplo
+            </button>
+          </>
+      }
     </div>
     {flipped && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8 }}>
       {[['Esqueci', C.err, 0], ['Difícil', C.orange, 1], ['Bom', C.sage, 2], ['Fácil', C.green, 3]].map(([l, co, q]) => (
